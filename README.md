@@ -1,5 +1,7 @@
 # Portable BMAD Coordinator
 
+[![tests](https://github.com/Ezopek/bmad-coordinator/actions/workflows/tests.yml/badge.svg)](https://github.com/Ezopek/bmad-coordinator/actions/workflows/tests.yml)
+
 A command-line coordinator that drives AI coding agents through a project's backlog one story at a time, in Git worktrees it owns, with every step recorded as evidence you can read back later. It is a Python standard-library CLI with a SQLite state store under the repository's `.git/`: no package to install, no service to run, nothing added to your project but one directory and one block in `AGENTS.md`.
 
 It works with the agent CLIs you already have: **Claude Code** (`claude`), **Codex CLI** (`codex`) and **GitHub Copilot CLI** (`copilot`). Each story is specified by one agent, reviewed by another, implemented, verified with your project's own commands, code-reviewed and merged into an integration branch, on your machine, with your accounts, under limits you set.

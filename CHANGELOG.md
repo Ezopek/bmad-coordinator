@@ -1,8 +1,8 @@
 # Changelog
 
-Dates, not versions: the coordinator has no release numbers yet (the first public release will be tagged `v0.1.0` on the commit it is published from), and the installed package carries a `package_revision` digest instead. Each entry names the design document (under `docs/`) whose decisions it implements; the document's status line records the evidence.
+Dates, with one tag: `v0.1.0` marks the first public release (2026-10-20, the entry below, published as the single-root history of this repository); the installed package carries a `package_revision` digest, not a version. Each entry names the design document (under `docs/`) whose decisions it implements; the document's status line records the evidence.
 
-## 2026-10-20
+## 2026-10-20 (v0.1.0)
 
 - The bill ([design](docs/bill-design.md), B1 to B8): `bill [--epic | --feature | --lease]` reads every client launch from the sealed receipts and prints the coordinator's observations (launches, wall clock, runs, driver turns) apart from the clients' reports (tokens, USD from Claude Code, premium requests from Copilot, the client's turns), with the count of launches that reported nothing beside every sum; the client facts record each client's own usage at return (Codex returns carried none before); the drive and epic summaries, `epic status` and the spec's `## Coordinator Result` carry the same numbers; `budgets.max_cost_usd` in the pipeline (per story) and in the epic input (per epic) stops a run `cost-budget` before the launch that would exceed the reported money, `epic resume --restart KEY --budgets FILE` and `epic resume --max-cost-usd N` are the way out; no price of the coordinator's own.
 - F22: a spec author's question is compared with a trailing full stop dropped (live hook 22); F21 and F22 are the F18 family.

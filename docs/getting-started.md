@@ -6,7 +6,7 @@ This page takes you from nothing to a finished epic on the bundled example, then
 
 **Host.** Linux, with the repository and the coordinator's scratch directories on a local **ext4** filesystem. The reason is narrow: the store's correctness rests on SQLite and `flock` locking between processes and on `fsync` durability of the sealed receipts, and both were probed on ext4 and nowhere else, so another filesystem is refused rather than assumed to behave the same. The state store checks the mount type before it writes and refuses anything else with `UNSUPPORTED_FILESYSTEM` (that includes a tmpfs `/tmp`, network mounts and, under WSL2, the Windows drives under `/mnt/`). WSL2 works when the repository lives on the Linux side, which is where this coordinator was developed and run. Other platforms and filesystems are untested and refused, not merely unsupported.
 
-**Python 3.11 or newer**, standard library only. There is nothing to `pip install`. The tests ran on Python 3.14; 3.11 is the declared floor.
+**Python 3.11 or newer**, standard library only. There is nothing to `pip install`. The suite runs on 3.11 in CI and on 3.14 where the coordinator is developed.
 
 **Git 2.40 or newer.** The story drive records `git --version` before its first command and stops `verify-env` below 2.40.
 
