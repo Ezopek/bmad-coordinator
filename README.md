@@ -8,7 +8,7 @@ It works with the agent CLIs you already have: **Claude Code** (`claude`), **Cod
 
 ## What it does
 
-- **Epic drive.** `epic start` takes the remaining stories of one epic from a BMAD-style `epics.md`, in order, and runs each through the story drive on a branch `coordinator/epic-<N>`. At `epic-done` the branch holds every story; you open the pull request.
+- **Epic drive.** `epic start` takes the remaining stories of one epic from the backlog (a BMAD-layout `epics.md` today; the layout is an adapter behind one contract), in order, and runs each through the story drive on a branch `coordinator/epic-<N>`. At `epic-done` the branch holds every story; you open the pull request.
 - **Story drive.** One story goes from its epic entry to a reviewed, committed branch `story/<key>`: a spec author writes the spec from the entry, a reviewer checks it, the spec is accepted (by you, or by the pipeline), a worker implements it in a linked worktree, the coordinator commits every attempt, runs your `verify` commands on that commit, bundles the result for a code review and accepts it when nothing blocks.
 - **Questions without you.** When a worker asks a question, a separate model call, the *judgment*, may answer it only by citing a clause you delegated (from the accepted spec or your project clauses). A binding question (persisted data, external contracts, security, anything a later change cannot undo) stops the run and waits for your decision through a file inbox.
 - **Evidence.** Every launch, return, commit, verify run, review and decision is a sealed receipt under `.git/coordinator/`; `epic status`, `drive status`, `detail` and `verify` read them back. What a model claims stays marked as a claim.
@@ -33,7 +33,7 @@ The coordinator is for the other case: you hand over a backlog and want to check
 - **One contract for three vendors.** The same pipeline, briefs, receipts and stops whichever CLI fills a role; a worker is swapped by editing one line.
 - **Resumable.** A killed run resumes from its receipts; a killed attempt stays `unknown` until you say what happened.
 
-What it costs you: one story at a time; Linux and ext4; a BMAD-shaped backlog (`epics.md`, `sprint-status.yaml`, a spec per story); a vocabulary to learn ([Concepts](docs/concepts.md)); and more wall-clock than typing the prompts yourself, since every step is a separate bounded process. It has not been measured against a person driving the same epic interactively, so it claims accountability and bounds, not speed or better code.
+What it costs you: one story at a time; Linux and ext4; a backlog in a supported layout (BMAD's today: `epics.md`, `sprint-status.yaml`, a decisions ledger; a spec per story); a vocabulary to learn ([Concepts](docs/concepts.md)); and more wall-clock than typing the prompts yourself, since every step is a separate bounded process. It has not been measured against a person driving the same epic interactively, so it claims accountability and bounds, not speed or better code.
 
 ## Requirements in short
 

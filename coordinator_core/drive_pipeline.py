@@ -9,6 +9,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
+from . import backlog
 from . import bmad_contract as contract
 from . import bmad_implementation as implementation
 from . import bmad_planning, bmad_spec_author, bundles, clients, judgment
@@ -199,7 +200,10 @@ def _project(value) -> None:
     without glob characters, so the status files' string-prefix checks (protected, prepare, sync_status) are sound.
     `context` (design D24) lists the relative files a spec author reads first."""
     _keys(value, ("setup", "verify", "env", "commit_identity", "output_limit_bytes"),
-          ("rules", "artifacts_dir", "briefs_dir", "context"), "Pipeline project")
+          ("rules", "artifacts_dir", "briefs_dir", "context", "backlog"), "Pipeline project")
+    if "backlog" in value:   # backlog design A3: the layout, from the closed registry; absent means bmad
+        _keys(value["backlog"], ("kind",), (), "Project backlog")
+        backlog.get(value["backlog"]["kind"])
     for name in ("setup", "verify"):
         if not isinstance(value[name], list):
             raise _invalid(f"Project {name} must be a list")

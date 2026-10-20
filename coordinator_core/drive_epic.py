@@ -15,7 +15,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath
 
 from . import bmad_implementation as implementation
-from . import bill, bmad_planning, drive, drive_pipeline
+from . import backlog, bill, bmad_planning, drive, drive_pipeline
+from .backlog_bmad import plan_stories, sprint_entries   # backlog design A2
 from .drive import EPIC_SESSION, EXIT, TOKEN, Outcome, Refusal, RunBounds, _bounds_check, _hook, _now, _seal, _sealed
 from .model import DecisionInput, DomainError, OwnerRef
 from .run_receipt import canonical
@@ -199,46 +200,6 @@ def check_template(template) -> dict:
 
 
 # Stories (E5) -------------------------------------------------------------------------------------------------------
-
-def sprint_entries(text: str) -> dict[str, str]:
-    """The `development_status` map as `{key: status}`; the map ends at the next top-level key (D18's rule)."""
-    lines = implementation._plain(text)[2].split("\n")
-    start = next((index for index, line in enumerate(lines) if line.rstrip() == "development_status:"), None)
-    if start is None:
-        raise DomainError("STALE_INPUT", "story-status: sprint-status.yaml has no development_status map")
-    entries = {}
-    for line in lines[start + 1:]:
-        if not line.strip() or line.lstrip().startswith("#"):
-            continue
-        if not line[0].isspace():
-            break
-        match = implementation._STATUS_LINE.match(line)
-        if match is not None:
-            entries[match.group(2).strip()] = implementation._unquote(match.group(3))
-    return entries
-
-
-def plan_stories(repo, commit: str, epics_path: str, epic: int) -> list[dict]:
-    """Design epic-drive E5: the `### Story <epic>.<M>:` headings of the epics file at `commit`, in order, each with
-    the one `development_status` key starting `<epic>-<M>-` and its status; `key` is None (and `keys` the candidates)
-    when none or several match. No story of the epic is `STALE_INPUT`."""
-    epics = implementation._read_at(repo, commit, epics_path, "Epics file")
-    sprint = implementation._read_at(repo, commit, f"{implementation.ARTIFACTS_DIR}/sprint-status.yaml",
-                                     "Sprint status")
-    entries = sprint_entries(sprint)
-    text = epics.lstrip("﻿").replace("\r\n", "\n")
-    found = []
-    for match in implementation._STORY_HEADING.finditer(text):
-        if int(match.group(1)) != epic:
-            continue
-        prefix = f"{match.group(1)}-{match.group(2)}-"
-        keys = [key for key in entries if key.startswith(prefix)]
-        key = keys[0] if len(keys) == 1 else None
-        found.append({"number": f"{match.group(1)}.{match.group(2)}", "title": match.group(3).strip(), "key": key,
-                      "keys": keys, "status": entries.get(key) if key else None})
-    if not found:
-        raise DomainError("STALE_INPUT", f"story-status: the epics file has no stories of epic {epic}")
-    return found
 
 
 # Git (E2–E4) --------------------------------------------------------------------------------------------------------
@@ -479,6 +440,7 @@ class Epic:
     """Design epic-drive E1: one run (a start or a resume) of an epic under the owner session `epic:<id>`."""
 
     def __init__(self, repo, store, owner: OwnerRef, state: dict, template: dict, bounds: RunBounds, clock):
+        self.backlog = backlog.resolve(template.get("project"))   # backlog design A3: the template names the layout
         self.repo, self.store, self.owner, self.state = repo, store, owner, state
         self.template, self.bounds, self.clock = template, bounds, clock
         self.base = store.path.parent
@@ -690,7 +652,7 @@ class Epic:
         if head is None:
             raise DomainError("INVALID_REPOSITORY", f"The integration branch {self.state['branch']} does not resolve")
         try:
-            plan = plan_stories(self.repo, head, self.state["epics_path"], self.state["epic"])
+            plan = self.backlog.stories(self.repo, head, self.state["epics_path"], self.state["epic"])
         except DomainError as exc:
             if exc.code == "STALE_INPUT":
                 return Outcome("needs-human", "story-status", {"detail": exc.message})
@@ -731,9 +693,8 @@ class Epic:
     def _gate(self, story: dict) -> Outcome | None:
         """E6: every precondition bullet met at the integration head, else `precondition-unmet`."""
         head = self.state["head_sha"]
-        epics = implementation._read_at(self.repo, head, self.state["epics_path"], "Epics file")
-        entry = implementation.parse_epic_story(epics, story["number"])
-        found = implementation.preconditions_state(self.repo, head, implementation.ARTIFACTS_DIR, entry.preconditions)
+        entry = self.backlog.entry_of_number(self.repo, head, self.state["epics_path"], story["number"])
+        found = self.backlog.preconditions(self.repo, head, implementation.ARTIFACTS_DIR, entry.preconditions)
         unmet = [item for item in found if item["state"] != "met"]
         if not unmet:
             return None
@@ -763,7 +724,8 @@ class Epic:
                     None, story["key"], self.state["branch"], worktree,
                     list(over.get("writable_scopes", defaults["writable_scopes"])),
                     list(over.get("project_clauses", defaults.get("project_clauses", []))),
-                    epic_story={"epics_path": self.state["epics_path"], "story_key": story["key"]}))
+                    epic_story={"epics_path": self.state["epics_path"], "story_key": story["key"],
+                                "backlog": self.backlog.kind}))
             except DomainError as exc:
                 return Outcome("failed", "story-add", {"key": story["key"], "gate": exc.code, "detail": exc.message})
             _hook("after-story-add", key=story["key"])

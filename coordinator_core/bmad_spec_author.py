@@ -13,6 +13,7 @@ import re
 from dataclasses import replace
 from pathlib import Path
 
+from . import backlog
 from . import bmad_implementation as implementation
 from .bmad_implementation import READY, SPEC_AUTHOR
 from .model import DomainError
@@ -222,8 +223,8 @@ def sources(repo, feature: dict, story: dict, project: dict) -> tuple[str, list[
     epic = story.get("epic_story")
     if not isinstance(epic, dict):
         raise DomainError("STALE_INPUT", "A spec attempt needs a story added from its epic entry")
-    entry = implementation._epic_entry(repo, feature["base_commit"], story["story_key"], epic["epics_path"],
-                                       story["spec_path"])
+    layout = backlog.get(epic.get("backlog"))   # backlog design A3: the kind recorded at story add
+    entry = layout.entry(repo, feature["base_commit"], story["story_key"], epic["epics_path"], story["spec_path"])
     done = []
     for path in sorted((Path(repo.worktree) / implementation._artifacts_dir(project)).glob(
             f"spec-{story['story_key'].split('-')[0]}-*.md")):
@@ -233,10 +234,9 @@ def sources(repo, feature: dict, story: dict, project: dict) -> tuple[str, list[
             continue
         if status == "done":
             done.append(path.relative_to(repo.worktree).as_posix())
-    found = implementation.preconditions_state(repo, feature["base_commit"], implementation._artifacts_dir(project),
-                                               story.get("preconditions", []))
-    return entry.text, list(project.get("context", [])), done, \
-        implementation.preconditions_section(found, feature["base_commit"])
+    found = layout.preconditions(repo, feature["base_commit"], implementation._artifacts_dir(project),
+                                 story.get("preconditions", []))
+    return entry.text, list(project.get("context", [])), done, layout.precondition_lines(found, feature["base_commit"])
 
 
 def brief(spec, feature, story: dict, decisions, continuation, project, epic_text: str, context_paths, done_specs,
