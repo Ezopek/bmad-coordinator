@@ -989,7 +989,8 @@ class EpicStopTests(EpicDriveCase):
     def hand_merge(self, ref: str) -> str:
         """The operator resolves a conflict in the epic worktree, taking the merged side's version of every file."""
         worktree = self.epic_worktree()
-        subprocess.run(["git", "-C", str(worktree), "merge", ref], capture_output=True)   # conflicts: exit 1
+        subprocess.run(["git", "-C", str(worktree), "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                        "merge", ref], capture_output=True)   # conflicts: exit 1; the identity: a bare runner has none
         conflicted = git(worktree, "diff", "--name-only", "--diff-filter=U").split()
         for path in conflicted:
             git(worktree, "checkout", "--theirs", "--", path)

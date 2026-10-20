@@ -15,10 +15,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - name: uv (the Copilot launcher tests need a real uv on PATH)
+        run: python3 -m pip install --quiet uv
       - name: Versions
         run: |
           python3 --version
           git --version
+          uv --version
           df -T "$GITHUB_WORKSPACE"
       - name: Suite
         run: PYTHONPATH=. PYTHONDONTWRITEBYTECODE=1 python3 -W error::Warning -m unittest discover -s tests -t .

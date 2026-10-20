@@ -10,7 +10,7 @@ Linux, a local ext4 filesystem, Python 3.11 or newer and Git 2.40 or newer, and 
 PYTHONPATH=. PYTHONDONTWRITEBYTECODE=1 python3 -W error::Warning -m unittest discover -s tests -t .
 ```
 
-It takes about half an hour, needs Git and an ext4 working directory, and never calls a model: every client is a fake executable the tests put on `PATH` (`tests/fake_clients.py`). One module runs in seconds with the same environment, for example `python3 -m unittest tests.test_examples`. Warnings are errors (`-W error::Warning`), so a change that raises one fails the suite. The same command runs on GitHub Actions for every push to `main` and every pull request (`.github/workflows/tests.yml`), on Python 3.11, the declared floor; a pull request is read once that run is green.
+It takes about half an hour, needs Git, `uv` on `PATH` (two Copilot launcher tests run the real one; the coordinator itself needs it for a Copilot bound author) and an ext4 working directory, and never calls a model: every client is a fake executable the tests put on `PATH` (`tests/fake_clients.py`). One module runs in seconds with the same environment, for example `python3 -m unittest tests.test_examples`. Warnings are errors (`-W error::Warning`), so a change that raises one fails the suite. The same command runs on GitHub Actions for every push to `main` and every pull request (`.github/workflows/tests.yml`), on Python 3.11, the declared floor; a pull request is read once that run is green.
 
 ## Rules
 

@@ -55,7 +55,7 @@ The coordinator is tested with fake clients (over a thousand tests, no model cal
 - `coordinator_core/`: the CLI and the state core. `package/` and `install.py`: the installer and the files it copies into a project as `.bmad-coordinator/`.
 - `docs/`: [getting started](docs/getting-started.md), [concepts](docs/concepts.md), [troubleshooting](docs/troubleshooting.md), the [usage reference](docs/state-core-usage.md), the design documents ([behavior contract](docs/behavior-contract.md), [v1 design](docs/v1-design.md), [worker adapter](docs/worker-adapter-design.md), [Claude adapter](docs/claude-adapter-design.md), [BMAD integration](docs/bmad-integration-design.md), [unattended driver](docs/unattended-driver-design.md), [judgment v2](docs/judgment-v2-design.md), [correction round](docs/correction-round-design.md), [implementation drive](docs/implementation-drive-design.md), [epic drive](docs/epic-drive-design.md)).
 - `examples/`: the example project and the pipeline and epic input for it.
-- `tests/`: the suite, run from this directory with `PYTHONPATH=. PYTHONDONTWRITEBYTECODE=1 python3 -W error::Warning -m unittest discover -s tests -t .` (several minutes; it needs Git and an ext4 working directory, never a model).
+- `tests/`: the suite, run from this directory with `PYTHONPATH=. PYTHONDONTWRITEBYTECODE=1 python3 -W error::Warning -m unittest discover -s tests -t .` (about half an hour; it needs Git, `uv` on `PATH` and an ext4 working directory, never a model).
 
 ## Scope and distribution
 
