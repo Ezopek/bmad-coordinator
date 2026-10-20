@@ -1,0 +1,31 @@
+{
+  "format": 1,
+  "block_source": "package/AGENTS.block.md",
+  "files": [
+    {"source": "package/run.py", "destination": "run.py"},
+    {"source": "coordinator_core/__init__.py", "destination": "coordinator_core/__init__.py"},
+    {"source": "coordinator_core/__main__.py", "destination": "coordinator_core/__main__.py"},
+    {"source": "coordinator_core/bmad_contract.py", "destination": "coordinator_core/bmad_contract.py"},
+    {"source": "coordinator_core/bmad_implementation.py", "destination": "coordinator_core/bmad_implementation.py"},
+    {"source": "coordinator_core/bmad_planning.py", "destination": "coordinator_core/bmad_planning.py"},
+    {"source": "coordinator_core/bmad_review.py", "destination": "coordinator_core/bmad_review.py"},
+    {"source": "coordinator_core/bmad_spec_author.py", "destination": "coordinator_core/bmad_spec_author.py"},
+    {"source": "coordinator_core/bundles.py", "destination": "coordinator_core/bundles.py"},
+    {"source": "coordinator_core/clients.py", "destination": "coordinator_core/clients.py"},
+    {"source": "coordinator_core/drive.py", "destination": "coordinator_core/drive.py"},
+    {"source": "coordinator_core/drive_epic.py", "destination": "coordinator_core/drive_epic.py"},
+    {"source": "coordinator_core/drive_pipeline.py", "destination": "coordinator_core/drive_pipeline.py"},
+    {"source": "coordinator_core/exporter.py", "destination": "coordinator_core/exporter.py"},
+    {"source": "coordinator_core/inbox.py", "destination": "coordinator_core/inbox.py"},
+    {"source": "coordinator_core/installation.py", "destination": "coordinator_core/installation.py"},
+    {"source": "coordinator_core/judgment.py", "destination": "coordinator_core/judgment.py"},
+    {"source": "coordinator_core/model.py", "destination": "coordinator_core/model.py"},
+    {"source": "coordinator_core/profiles.py", "destination": "coordinator_core/profiles.py"},
+    {"source": "coordinator_core/repo.py", "destination": "coordinator_core/repo.py"},
+    {"source": "coordinator_core/run_receipt.py", "destination": "coordinator_core/run_receipt.py"},
+    {"source": "coordinator_core/service.py", "destination": "coordinator_core/service.py"},
+    {"source": "coordinator_core/store.py", "destination": "coordinator_core/store.py"},
+    {"source": "coordinator_core/worker.py", "destination": "coordinator_core/worker.py"},
+    {"source": "LICENSE", "destination": "LICENSE"}
+  ]
+}

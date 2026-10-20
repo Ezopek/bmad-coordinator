@@ -1,0 +1,53 @@
+{
+ "kind": "drive-pipeline",
+ "format": 1,
+ "feature_id": "__FEATURE__",
+ "mandate_revision": 1,
+ "budgets": {
+  "max_updates": 3,
+  "max_judgments": 6,
+  "max_corrections": 2
+ },
+ "accept_on_high": false,
+ "spec_auto_accept": true,
+ "project": {
+  "setup": [],
+  "verify": [
+   {
+    "name": "unit",
+    "argv": ["python3", "-m", "unittest", "discover", "-s", "tests", "-t", "."],
+    "timeout_seconds": 120
+   }
+  ],
+  "env": ["PATH", "HOME"],
+  "commit_identity": {
+   "name": "BMAD Coordinator",
+   "email": "coordinator@localhost"
+  },
+  "output_limit_bytes": 65536,
+  "rules": ["docs/house-rules.md"]
+ },
+ "roles": {
+  "worker": {"client": "claude-code", "model": "sonnet", "timeout": 900},
+  "reviewer": {"client": "claude-code", "model": "opus", "timeout": 900},
+  "judgment": {"client": "claude-code", "model": "sonnet", "timeout": 600}
+ },
+ "steps": [
+  {"id": "spec", "kind": "spec", "author_id": "story-worker",
+   "story": {"spec_path": "_bmad-output/implementation-artifacts/spec-__KEY__.md", "story_key": "__KEY__"}},
+  {"id": "spec-bundle", "kind": "bundle", "of": "spec"},
+  {"id": "spec-review", "kind": "review", "of": "spec-bundle", "reviewer_id": "code-reviewer"},
+  {"id": "spec-accept", "kind": "accept", "of": "spec-review"},
+  {"id": "spec-ready", "kind": "status", "phase": "spec", "of": "spec-accept"},
+  {"id": "setup", "kind": "setup"},
+  {"id": "start", "kind": "status", "phase": "start"},
+  {"id": "impl", "kind": "implement", "author_id": "story-worker",
+   "story": {"spec_path": "_bmad-output/implementation-artifacts/spec-__KEY__.md", "story_key": "__KEY__"}},
+  {"id": "impl-commit", "kind": "commit", "of": "impl"},
+  {"id": "impl-verify", "kind": "verify", "of": "impl-commit"},
+  {"id": "impl-bundle", "kind": "bundle", "of": "impl-verify"},
+  {"id": "impl-review", "kind": "review", "of": "impl-bundle", "reviewer_id": "code-reviewer"},
+  {"id": "impl-accept", "kind": "accept", "of": "impl-review"},
+  {"id": "finish", "kind": "status", "phase": "done", "of": "impl-accept"}
+ ]
+}

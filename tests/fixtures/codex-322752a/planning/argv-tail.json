@@ -1,0 +1,17 @@
+[
+ "exec",
+ "-",
+ "-C",
+ "<ROOT>/feature",
+ "--sandbox",
+ "workspace-write",
+ "-c",
+ "approval_policy=never",
+ "--json",
+ "--output-schema",
+ "<ROOT>/main/.git/coordinator/runs/<RUN>/return.schema.json",
+ "--output-last-message",
+ "<ROOT>/main/.git/coordinator/runs/<RUN>/last.json",
+ "-m",
+ "fake-model"
+]

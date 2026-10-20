@@ -1,0 +1,16 @@
+[
+ "argv",
+ "assignment_id",
+ "cli_version",
+ "common_dir",
+ "envelope_sha256",
+ "kind",
+ "model",
+ "observed_at",
+ "pgid",
+ "pid",
+ "request_fingerprint",
+ "requested_sandbox",
+ "source_id",
+ "worktree"
+]

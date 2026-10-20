@@ -1,0 +1,14 @@
+{
+ "epics_path": "_bmad-output/planning-artifacts/epics.md",
+ "epic": 1,
+ "worktrees_dir": "/absolute/directory/outside/the/repository",
+ "story_defaults": {
+  "writable_scopes": ["pkg/", "tests/"],
+  "project_clauses": [
+   "The coordinator commits; never ask whether to commit.",
+   "Choose the simplest implementation that satisfies the story and the house rules.",
+   "Never run Git write commands or fetch; the coordinator owns Git.",
+   "Run one command per shell call."
+  ]
+ }
+}
