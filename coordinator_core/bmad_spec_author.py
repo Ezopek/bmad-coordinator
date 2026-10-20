@@ -140,15 +140,16 @@ def _entries(items) -> bool:
 
 
 def _same(text: str) -> str:
-    """A question as compared (ruling R2, finding F18): code quotes dropped and whitespace collapsed, so a return that
-    quotes the file's entry without its Markdown code marks still names it."""
+    """A question or an option label as compared (ruling R2, findings F18 and F21): code quotes dropped and whitespace
+    collapsed, so a return that quotes the file's entry without its Markdown code marks still names it."""
     return " ".join(text.replace("`", "").split())
 
 
 def _compared(items) -> list:
-    """What the return and the file share entry by entry (ruling R2): the id, the question (as `_same`), the option
-    labels."""
-    return [(item["id"], _same(item["question"]), [option["label"] for option in item["options"]]) for item in items]
+    """What the return and the file share entry by entry (ruling R2): the id, the question and the option labels (both
+    as `_same`)."""
+    return [(item["id"], _same(item["question"]), [_same(option["label"]) for option in item["options"]])
+            for item in items]
 
 
 def _sealed_text(binding: dict, run_dir) -> tuple[str, str]:
@@ -170,7 +171,7 @@ def check(final, assignment, binding, run_dir, observed_changed) -> dict:
     Git delta) without tasks and verification; the attempt changes the spec file only; `open_questions` and
     `assumptions` are typed; a `completed` return has no open question and changed the spec file, which has no
     `## Open Questions` section and the status `ready-for-dev`; a `needs-decision` return's `open_questions` equal the
-    spec's entries (ids, questions with code quotes and whitespace aside, option labels) and its aggregate asks the
+    spec's entries (ids; questions and option labels with code quotes and whitespace aside) and its aggregate asks the
     entries' questions in order. A
     `completed` return that changed nothing is an empty claim (ruling P14): the driver's empty-attempt rule stops it."""
     payload = implementation.check({**final, "tasks": [], "verification": []}, assignment, binding, run_dir,

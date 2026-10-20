@@ -19,14 +19,28 @@ It works with the agent CLIs you already have: **Claude Code** (`claude`), **Cod
 - It is not a supervisor. A run is a bounded foreground process; when it stops, you read the stop and run `epic resume`.
 - It does not understand your project. Your verify commands, your writable scopes and your clauses are the guard rails.
 
+## Why not the agent CLI alone
+
+Claude Code, Codex and Copilot each take a backlog item on their own, interactively or headless, and their own orchestration (subagents, hooks, cloud tasks that open pull requests) is quicker to set up and quicker per story than this coordinator. Use them alone when you sit at the keyboard, when one story is the whole job, or when you are content to take the agent's word for what it did.
+
+The coordinator is for the other case: you hand over a backlog and want to check the result instead of trusting it.
+
+- **Evidence you did not write.** Every launch, return, commit, verify run, review and decision is a sealed receipt. What the coordinator observed (a process returned, a command exited, the diff is what it is) is kept apart from what a model claimed (tasks, findings, rationale), and nothing upgrades a claim. A week later `git log` and `epic status` still tell what happened.
+- **Bounds that hold while you are away.** Attempts, corrections, continuations, judgments, turns and time are counted and stop the run when spent. A model's question is answered only by citing a clause you delegated, or the run stops and waits. A worker writes only where its scope says.
+- **Your verify commands as the gate.** Nothing is bundled or reviewed before your own commands passed on the committed attempt, and nothing is accepted while a critical finding is open.
+- **One contract for three vendors.** The same pipeline, briefs, receipts and stops whichever CLI fills a role; a worker is swapped by editing one line.
+- **Resumable.** A killed run resumes from its receipts; a killed attempt stays `unknown` until you say what happened.
+
+What it costs you: one story at a time; Linux and ext4; a BMAD-shaped backlog (`epics.md`, `sprint-status.yaml`, a spec per story); a vocabulary to learn ([Concepts](docs/concepts.md)); and more wall-clock than typing the prompts yourself, since every step is a separate bounded process. It has not been measured against a person driving the same epic interactively, so it claims accountability and bounds, not speed or better code.
+
 ## Requirements in short
 
-Linux with the repository on a local ext4 filesystem (WSL2 is fine when the repository lives on the Linux side), Python 3.11 or newer with the standard library only, Git 2.40 or newer, and at least one agent CLI installed and logged in. The full list, with what each client can do: [Prerequisites](docs/getting-started.md#prerequisites).
+Linux with the repository on a local ext4 filesystem (the only one the store's locking and durability were probed on; WSL2 is fine when the repository lives on the Linux side), Python 3.11 or newer with the standard library only, Git 2.40 or newer, and at least one agent CLI installed and logged in. The full list, with what each client can do: [Prerequisites](docs/getting-started.md#prerequisites).
 
 ## Start here
 
 1. [Getting started](docs/getting-started.md): prerequisites, installation into a repository, a ten-minute run on the bundled example, then your own repository.
-2. [`examples/greetings/`](examples/greetings/): the example project, pipeline and epic input the quickstart uses.
+2. [`examples/greetings/`](examples/greetings/): the example project, pipeline and epic input the quickstart uses; [A recorded run](docs/example-run.md) shows what those commands printed, stop by stop, with the receipts and the client-reported cost.
 3. [Concepts](docs/concepts.md): the words the commands, stops and receipts use (mandate, attempt, bundle, judgment, stop, observed and claimed), in reading order.
 4. [Troubleshooting](docs/troubleshooting.md): the first errors and stops, their causes and the way out.
 5. [Usage reference](docs/state-core-usage.md): every command, every stop with its operator action, the pipeline format and the evidence limits.
@@ -34,7 +48,7 @@ Linux with the repository on a local ext4 filesystem (WSL2 is fine when the repo
 
 ## Maturity
 
-The coordinator is tested with fake clients (over a thousand tests, no model calls) and has run live on fixtures with real Claude Code, Codex and Copilot workers and on one real TypeScript project, where it drove single stories and a whole epic to `done`. The [changelog](CHANGELOG.md) lists what landed when. Each design document ends with a status line and a §7 of open follow-ups; the plans and live-run reports they cite by name are kept in the project's private history, not in this tree. Nothing here has run overnight or without someone able to read a stop: "unattended" means a bounded run with zero interventions, not continuous operation.
+The coordinator is tested with fake clients (over a thousand tests, no model calls) and has run live on fixtures with real Claude Code, Codex and Copilot workers and on one real TypeScript project, where it drove single stories and a whole epic to `done`. [A recorded run](docs/example-run.md) of the quickstart shows the shape of that evidence. The suite runs on GitHub Actions for every push and pull request. The [changelog](CHANGELOG.md) lists what landed when. Each design document ends with a status line and a §7 of open follow-ups; the plans and live-run reports they cite by name are kept in the project's private history, not in this tree. Nothing here has run overnight or without someone able to read a stop: "unattended" means a bounded run with zero interventions, not continuous operation.
 
 ## Repository layout
 

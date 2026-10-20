@@ -1535,6 +1535,34 @@ class SpecAuthorTests(StoryCase):
         self.assertEqual("unknown", report.state)
         self.assertIn("differ from the spec", " ".join(report.evidence_needs))
 
+    def test_a_return_may_quote_an_option_label_without_its_code_marks(self):
+        # design §7 F21 (the recorded example run, 2026-10-20): the file's label is `fallback like `greet`'s
+        # `stranger``, the return's is the same words without the code marks; another label is another option.
+        assignment = self.prep_spec()["assignment_id"]
+        spec_text = SPEC_WITH_QUESTION.replace("keep (the name is used exactly as given)",
+                                               "fallback like `greet`'s `stranger` (the name is used exactly as given)")
+        options = [{"label": "strip", "consequence": "callers get a trimmed name"},
+                   {"label": "fallback like greet's stranger", "consequence": "the name is used exactly as given"}]
+        report = self.run_spec(assignment, [(SPEC_PATH, spec_text)],
+                               result="needs-decision", questions=["Strip whitespace from the name?"],
+                               options=["strip: callers get a trimmed name",
+                                        "fallback like greet's stranger: the name is used exactly as given"],
+                               open_questions=[{"id": "Q1", "question": "Strip whitespace from the name?",
+                                                "options": options, "recommendation": "strip"}])
+        self.assertEqual("needs-decision", report.state, report.evidence_needs)
+        (self.epic_path / SPEC_PATH).write_text(SPEC_READY)
+        worker.historical_return(self.epic_repo, self.store, assignment)
+        other = self.prep_spec(key="s2")["assignment_id"]
+        options[1]["label"] = "fallback like greet's visitor"
+        report = self.run_spec(other, [(SPEC_PATH, spec_text)],
+                               result="needs-decision", questions=["Strip whitespace from the name?"],
+                               options=["strip: callers get a trimmed name",
+                                        "fallback like greet's visitor: the name is used exactly as given"],
+                               open_questions=[{"id": "Q1", "question": "Strip whitespace from the name?",
+                                                "options": options, "recommendation": "strip"}])
+        self.assertEqual("unknown", report.state)
+        self.assertIn("differ from the spec", " ".join(report.evidence_needs))
+
     def test_spec_author_completed_return_commits_the_spec_file_only_and_bundles_it(self):
         # the completed attempt first: a refused attempt fences the worktree (as today), so the refusal comes last
         again = self.prep_spec()["assignment_id"]

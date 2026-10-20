@@ -1,0 +1,24 @@
+# The full suite, as CONTRIBUTING.md describes it, on the declared Python floor. It never calls a model: every client
+# is a fake executable the tests put on PATH. It takes about half an hour on a developer machine and longer here.
+name: tests
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+jobs:
+  suite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Versions
+        run: |
+          python3 --version
+          git --version
+          df -T "$GITHUB_WORKSPACE"
+      - name: Suite
+        run: PYTHONPATH=. PYTHONDONTWRITEBYTECODE=1 python3 -W error::Warning -m unittest discover -s tests -t .

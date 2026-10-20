@@ -4,7 +4,7 @@ This page takes you from nothing to a finished epic on the bundled example, then
 
 ## Prerequisites
 
-**Host.** Linux, with the repository and the coordinator's scratch directories on a local **ext4** filesystem. The state store checks the mount type before it writes and refuses anything else with `UNSUPPORTED_FILESYSTEM` (that includes a tmpfs `/tmp`, network mounts and, under WSL2, the Windows drives under `/mnt/`). WSL2 works when the repository lives on the Linux side, which is where this coordinator was developed and run. Other platforms and filesystems are untested and refused, not merely unsupported.
+**Host.** Linux, with the repository and the coordinator's scratch directories on a local **ext4** filesystem. The reason is narrow: the store's correctness rests on SQLite and `flock` locking between processes and on `fsync` durability of the sealed receipts, and both were probed on ext4 and nowhere else, so another filesystem is refused rather than assumed to behave the same. The state store checks the mount type before it writes and refuses anything else with `UNSUPPORTED_FILESYSTEM` (that includes a tmpfs `/tmp`, network mounts and, under WSL2, the Windows drives under `/mnt/`). WSL2 works when the repository lives on the Linux side, which is where this coordinator was developed and run. Other platforms and filesystems are untested and refused, not merely unsupported.
 
 **Python 3.11 or newer**, standard library only. There is nothing to `pip install`. The tests ran on Python 3.14; 3.11 is the declared floor.
 
@@ -64,7 +64,7 @@ run doctor --base "$(git -C "$REPO" rev-parse HEAD)" --client claude-code
 
 ## Quickstart: the example epic
 
-The example is a one-function Python package with a BMAD-shaped backlog: Epic 1 has four stories, the first already done, the third gated on a deferred-work entry that is already settled. The drive writes a spec for each remaining story, reviews it, implements it, runs the package's unit tests, reviews the code and merges. It makes real model calls (about USD 1.5 with the roles in the example pipeline) and needs **Claude Code** logged in; the end of this section shows how to use Codex or Copilot workers instead.
+The example is a one-function Python package with a BMAD-shaped backlog: Epic 1 has four stories, the first already done, the third gated on a deferred-work entry that is already settled. The drive writes a spec for each remaining story, reviews it, implements it, runs the package's unit tests, reviews the code and merges. It makes real model calls (about USD 1.5 with the roles in the example pipeline) and needs **Claude Code** logged in; the end of this section shows how to use Codex or Copilot workers instead. [A recorded run](example-run.md) shows what each of these commands printed when they were run exactly as written here.
 
 ```sh
 SRC=/absolute/path/to/bmad-coordinator
@@ -230,6 +230,7 @@ Read this before the first drive on a repository you care about.
 
 - [Concepts](concepts.md): the words used here and in the stops (mandate, attempt, bundle, judgment, lease, observed and claimed), in reading order.
 - [Troubleshooting](troubleshooting.md): the first errors and stops with their causes and the way out.
+- [A recorded run](example-run.md): the quickstart as it ran, command by command, with the summary, the receipts and the cost.
 - [Usage reference](state-core-usage.md): every command and flag, the pipeline formats, the stop tables, the evidence limits, the client-specific rules.
 - [Model selection guide](model-selection-guide.md): models per role with observed costs and turn counts.
 - Design documents: [implementation drive](implementation-drive-design.md) (the story pipeline, D1 to D26) and [epic drive](epic-drive-design.md) (E1 to E15); the [unattended driver](unattended-driver-design.md) and [judgment v2](judgment-v2-design.md) for the planning path; the [Claude adapter](claude-adapter-design.md) for what the Claude launch allows and records. Each ends with a status line and a §7 of open follow-ups.

@@ -1,12 +1,14 @@
 # Changelog
 
-Dates, not versions: the coordinator has no release numbers yet, and the installed package carries a `package_revision` digest instead. Each entry names the design document (under `docs/`) whose decisions it implements; the document's status line records the evidence.
+Dates, not versions: the coordinator has no release numbers yet (the first public release will be tagged `v0.1.0` on the commit it is published from), and the installed package carries a `package_revision` digest instead. Each entry names the design document (under `docs/`) whose decisions it implements; the document's status line records the evidence.
 
 ## 2026-10-20
 
 - Public documentation: the README as the entry, getting started (prerequisites, installation, the quickstart, your own repository, stops, costs, safety), concepts, troubleshooting, the example project `examples/greetings/` with its pipeline and epic input, this changelog and the contributing guide.
 - The MIT license, also copied into every installed package.
 - The development history (plans, live-run reports, experiments, research) left the public tree.
+- The README says why the coordinator and not the agent CLI alone, and what that costs; getting started and troubleshooting give the reason for the ext4 rule; the suite runs on GitHub Actions (`.github/workflows/tests.yml`, Python 3.11); [a recorded run](docs/example-run.md) of the quickstart.
+- F21: a spec author's option label is compared with code quotes and whitespace aside, as its question is since F18; the recorded run had stopped `attempt-unknown` on a label written with code marks in the file and without them in the return.
 
 ## 2026-10-19
 
