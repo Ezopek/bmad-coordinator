@@ -144,7 +144,7 @@ Read from the sealed receipts under `$REPO/.git/coordinator/runs/` (one director
 
 Launches: 12; client-reported cost: USD 1.08 over 12 launches, 0 without a reported cost; first launch to last return: 282 s.
 
-The reviewer (Opus) costs about twice the worker (Sonnet) per launch here; the [model selection guide](model-selection-guide.md) has the figures from the other runs and clients.
+The reviewer (Opus) costs about twice the worker (Sonnet) per launch here; the [model selection guide](model-selection-guide.md) has the figures from the other runs and clients. This table was read from the receipts by a script; since the [bill](bill-design.md) landed later the same day, `run bill --epic <id>` prints it (with the token counts the receipts of this run do not yet hold).
 
 ## What is on disk afterwards
 

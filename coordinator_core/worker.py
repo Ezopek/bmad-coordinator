@@ -420,8 +420,8 @@ def _validated_receipt(repo, store, assignment, directory, historical=False):
        hashlib.sha256(last).hexdigest() != value["last_sha256"] or last != terminal.final or \
        (value["exit_code"] != 0 and not stopped):
         raise DomainError("UNKNOWN_EVIDENCE", "Terminal receipt no longer matches raw process output")
-    if clients.client_facts(client, assignment["permission_mode"], terminal, web=launch.get("web") is True) != \
-       value.get("client_facts", {}):
+    if not clients.facts_agree(value.get("client_facts"), clients.client_facts(
+            client, assignment["permission_mode"], terminal, web=launch.get("web") is True)):
         raise DomainError("UNKNOWN_EVIDENCE", "Client facts differ from the retained client output")
     if stopped:   # design D25: no final message, no profile payload; the stop and its fixed fields are re-derived
         expected = _stop_final(assignment, terminal.stop)

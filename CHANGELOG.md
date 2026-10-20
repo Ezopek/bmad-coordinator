@@ -4,6 +4,9 @@ Dates, not versions: the coordinator has no release numbers yet (the first publi
 
 ## 2026-10-20
 
+- The bill ([design](docs/bill-design.md), B1 to B8): `bill [--epic | --feature | --lease]` reads every client launch from the sealed receipts and prints the coordinator's observations (launches, wall clock, runs, driver turns) apart from the clients' reports (tokens, USD from Claude Code, premium requests from Copilot, the client's turns), with the count of launches that reported nothing beside every sum; the client facts record each client's own usage at return (Codex returns carried none before); the drive and epic summaries, `epic status` and the spec's `## Coordinator Result` carry the same numbers; `budgets.max_cost_usd` in the pipeline (per story) and in the epic input (per epic) stops a run `cost-budget` before the launch that would exceed the reported money, `epic resume --restart KEY --budgets FILE` and `epic resume --max-cost-usd N` are the way out; no price of the coordinator's own.
+- F22: a spec author's question is compared with a trailing full stop dropped (live hook 22); F21 and F22 are the F18 family.
+- Python 3.11, the declared floor, holds again: the status step used `Path.read_text(newline=)`, which exists since 3.13 (found by the first CI run).
 - Public documentation: the README as the entry, getting started (prerequisites, installation, the quickstart, your own repository, stops, costs, safety), concepts, troubleshooting, the example project `examples/greetings/` with its pipeline and epic input, this changelog and the contributing guide.
 - The MIT license, also copied into every installed package.
 - The development history (plans, live-run reports, experiments, research) left the public tree.

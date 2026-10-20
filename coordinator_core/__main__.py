@@ -13,7 +13,7 @@ from pathlib import Path
 from types import UnionType
 from typing import Any, Union, get_args, get_origin, get_type_hints
 
-from . import bmad_contract, bmad_planning, bmad_review, clients, drive, drive_epic, drive_pipeline, inbox
+from . import bill, bmad_contract, bmad_planning, bmad_review, clients, drive, drive_epic, drive_pipeline, inbox
 from .exporter import export_checkpoint, import_checkpoint
 from .installation import doctor
 from .model import (AssignmentInput, BundleInput, DecisionInput, DomainError, FeatureInput,
@@ -161,7 +161,15 @@ def _parser():
                                                "(design E15)")
     epic_resume.add_argument("--roles", type=Path, help="with --restart: a JSON file {role: {timeout?, max_turns?}} "
                                                         "that becomes the story's roles override (design E14)")
+    epic_resume.add_argument("--budgets", type=Path, help="with --restart: a JSON file {\"max_cost_usd\": N} that "
+                                                          "becomes the story's budgets override (bill design B5)")
+    epic_resume.add_argument("--max-cost-usd", type=float, help="raises the epic's own cost bound before the run "
+                                                                "(bill design B6)")
     leaf("status", parent=epic).add_argument("--epic")
+    billed = leaf("bill")   # bill design B3: read only, no token, no lock
+    billed.add_argument("--epic", help="every story of the epic, in order, and its total")
+    billed.add_argument("--feature", help="one story or feature")
+    billed.add_argument("--lease", help="one lease")
     for item in (epic_start, epic_resume):
         item.add_argument("--max-turns", type=int)
         item.add_argument("--deadline", type=float)
@@ -288,10 +296,14 @@ def _epic(repo, args):
     else:  # exempt from the shared lock: resume takes only the exclusive one; no token file yet is E12's re-claim
         if args.roles is not None and args.restart is None:   # the pairing before the roles file is read
             raise DomainError("INVALID_INPUT", "--roles goes with --restart")
+        if args.budgets is not None and args.restart is None:
+            raise DomainError("INVALID_INPUT", "--budgets goes with --restart")
         owner = _owner(args.token_file) if args.token_file.exists() else None
         summary, code = drive_epic.resume(repo, owner, bounds or None, args.judgment_root, skip=args.skip,
                                           restart=args.restart,
                                           roles=_roles_file(args.roles) if args.roles is not None else None,
+                                          budgets=_roles_file(args.budgets) if args.budgets is not None else None,
+                                          max_cost_usd=args.max_cost_usd,
                                           epic_id=args.epic, token_path=args.token_file)
     return _Exit(summary, code)
 
@@ -348,6 +360,8 @@ def _run(args):
         return drive.status(repo, args.feature)
     if args.command == "epic" and args.action == "status":   # read only, before the store opens (epic-drive E13)
         return drive_epic.status(repo, args.epic)
+    if args.command == "bill":   # read only, before the store opens (bill design B3)
+        return bill.command(repo, epic=args.epic, feature=args.feature, lease=args.lease)
     if args.command == "inbox":
         if args.action == "add":
             return inbox.add(repo, args.type, _object())

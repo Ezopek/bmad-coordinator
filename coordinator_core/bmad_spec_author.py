@@ -140,9 +140,10 @@ def _entries(items) -> bool:
 
 
 def _same(text: str) -> str:
-    """A question or an option label as compared (ruling R2, findings F18 and F21): code quotes dropped and whitespace
-    collapsed, so a return that quotes the file's entry without its Markdown code marks still names it."""
-    return " ".join(text.replace("`", "").split())
+    """A question or an option label as compared (ruling R2, findings F18, F21 and F22): code quotes dropped,
+    whitespace collapsed and a trailing full stop dropped, so a return that quotes the file's entry without its
+    Markdown code marks, or ends the sentence where the file's entry runs on into its options, still names it."""
+    return " ".join(text.replace("`", "").split()).rstrip(". ")
 
 
 def _compared(items) -> list:

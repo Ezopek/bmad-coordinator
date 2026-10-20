@@ -95,6 +95,7 @@ class Client:
                                                  # env-scrub.json sidecar, so launch.json bytes stay unchanged (Codex)
     script_launcher: bool = False                # a bound author runs its commands through the coordinator-written
                                                  # RUN/worker-tools/bmad-script (Copilot, design section 14)
+    reports_cost: bool = False                   # bill design B5: the client reports a money figure (USD)
 
 
 @dataclass(frozen=True)
@@ -142,9 +143,13 @@ def _codex_thread(events: Path) -> str:
 
 
 def _codex_terminal(run_dir: Path, launch: dict) -> Terminal:
+    """The thread's single `turn.completed` (validated by `_codex_thread`, last) carries Codex's own token counts as
+    `usage`; recorded as given when present (bill design B2), a fact and never a condition of validity."""
     thread = _codex_thread(run_dir / "events.jsonl")
     try:
-        return Terminal(thread, (run_dir / "last.json").read_bytes(), {})
+        usage = jsonl_records(run_dir / "events.jsonl")[-1].get("usage")
+        facts = {"usage": usage} if isinstance(usage, dict) else {}
+        return Terminal(thread, (run_dir / "last.json").read_bytes(), facts)
     except OSError as exc:
         raise _unknown("Worker final message is missing") from exc
 
@@ -506,6 +511,9 @@ def _claude_terminal(run_dir: Path, launch: dict) -> Terminal:
                  "terminal_reason": result.get("terminal_reason"), "stop_reason": result.get("stop_reason"),
                  "models": sorted(usage) if isinstance(usage, dict) else None,
                  "total_cost_usd": result.get("total_cost_usd"),
+                 # bill design B2: the client's own usage, as given (tokens per model with its USD figure and basis)
+                 "usage": result.get("usage"), "model_usage": usage,
+                 "duration_ms": result.get("duration_ms"), "duration_api_ms": result.get("duration_api_ms"),
                  "init": {key: init.get(key) for key in ("tools", "mcp_servers", "permissionMode", "cwd", "model")},
                  "isolation_gaps": sorted(gaps), "bundle_read_basis": _bundle_read_basis(seen, launch)}
         checked = [name for name in tools if not name.startswith("mcp__")] if "tools" in init else []
@@ -523,7 +531,7 @@ def _claude_terminal(run_dir: Path, launch: dict) -> Terminal:
 CLAUDE_REQUESTED = {"read-only": frozenset(REVIEW_TOOLS.split(",")),
                     "workspace-write": frozenset(AUTHOR_TOOLS.split(","))}
 CLAUDE = Client(
-    name="claude-code", executable="claude", confinement="tool-policy", presets_session=True,
+    name="claude-code", executable="claude", confinement="tool-policy", presets_session=True, reports_cost=True,
     return_source="stdout", envelope_via="stdin", max_envelope_bytes=None, write_free_readonly=True,
     max_turns_default=60, env={"DISABLE_AUTOUPDATER": "1", "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
                                "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"},  # auto memory: docs-only, P0 checks it
@@ -694,7 +702,8 @@ def _copilot_observe(run_dir: Path, launch: dict) -> dict:
     sessions = _listing(run_dir / "copilot-home", "session-state")
     workspace = _copilot_workspace(run_dir, session) if isinstance(session, str) and session in (sessions or ()) \
         else None
-    value = {"sessions": sessions, "workspace": workspace, "home_session_after": _home_session(session)}
+    value = {"sessions": sessions, "workspace": workspace, "home_session_after": _home_session(session),
+             "session_usage": _copilot_session_usage(run_dir, session) if isinstance(session, str) else None}
     if COPILOT_LOCKS in (sessions or ()):
         value["locks"] = _listing(run_dir / "copilot-home", "session-state", COPILOT_LOCKS)
     return value
@@ -707,6 +716,32 @@ def _instant(value: object) -> datetime:
     if instant.tzinfo is None:
         raise ValueError("timestamp has no time zone")
     return instant
+
+
+def _copilot_session_usage(run_dir: Path, session: str) -> dict | None:
+    """Bill design B2: the `usage` (token counts) and `requests` of the last `session.shutdown` record in the
+    launch's own session state, `copilot-home/session-state/<session>/events.jsonl`; None when the file or the
+    record is missing or unreadable. Read once by `_copilot_observe` into the sealed freshness.json (a replay never
+    reads the home again); a fact about the session, never a condition of the return's validity."""
+    try:
+        fd = _open_nofollow(run_dir, "copilot-home", "session-state", session, "events.jsonl")
+    except OSError:
+        return None
+    try:
+        with os.fdopen(fd, "rb") as stream:
+            lines = stream.read().splitlines()
+    except OSError:
+        return None
+    found = None
+    for line in lines:
+        try:
+            item = json.loads(line)
+        except ValueError:
+            continue
+        data = item.get("data") if isinstance(item, dict) and item.get("type") == "session.shutdown" else None
+        if isinstance(data, dict) and isinstance(data.get("usage"), dict):
+            found = {"usage": data["usage"], "requests": data.get("requests")}
+    return found
 
 
 def _copilot_fresh(run_dir: Path, launch: dict, session: str) -> None:
@@ -855,6 +890,9 @@ def _copilot_terminal(run_dir: Path, launch: dict) -> Terminal:
         _copilot_fresh(run_dir, launch, session)
         facts = {"usage": result.get("usage"), "copilotVersion": version, "denials": denials,
                  "isolation_gaps": sorted(set(gaps))}
+        session_usage = json.loads((run_dir / "freshness.json").read_bytes()).get("session_usage")
+        if isinstance(session_usage, dict):   # bill design B2: from the sealed observation, so a replay agrees
+            facts["session_usage"] = session_usage
         if offered:
             facts["offered_tools"] = sorted(offered)
         if names:  # the names tool_check reads; no tool events is no tool information
@@ -1011,6 +1049,21 @@ def client_facts(client: Client, mode: str, terminal: Terminal, web: bool = Fals
     if facts or check != "not-checked":
         facts["tool_check"] = check
     return facts
+
+
+USAGE_FACTS = frozenset({"usage", "model_usage", "duration_ms", "duration_api_ms", "session_usage"})
+
+
+def facts_agree(sealed: dict | None, recomputed: dict) -> bool:
+    """Replay (worker inspect and reconcile): the facts recomputed from the retained bytes must equal the sealed
+    ones, key for key, except that a receipt sealed before the bill's additive usage keys (B2, `USAGE_FACTS`) is
+    compared without them, and a sealed receipt without facts at all (a Codex return before B2) agrees with a
+    recomputation that would carry usage and `tool_check: not-checked` only."""
+    sealed = sealed or {}
+    trimmed = {key: value for key, value in recomputed.items() if key in sealed or key not in USAGE_FACTS}
+    if not sealed and trimmed == {"tool_check": "not-checked"}:
+        trimmed = {}
+    return trimmed == sealed
 
 
 def recorded_tool_check(receipt: dict) -> str:

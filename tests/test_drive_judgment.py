@@ -493,6 +493,10 @@ class IsolationTests(Base):
             self.assertEqual(0o600, stat.S_IMODE(copy.stat().st_mode))
             self.assertNotEqual(source.stat().st_ino, copy.stat().st_ino)
         self.assertEqual(("observed", "model-claim"), (record["state"], record["quality"]))
+        facts = json.loads((self.jdir() / "receipts" / "return.json").read_bytes())["client_facts"]   # bill B2
+        self.assertEqual({"usage": {"input_tokens": 1000, "cached_input_tokens": 400, "cache_write_input_tokens": 0,
+                                    "output_tokens": 50, "reasoning_output_tokens": 5}, "tool_check": "not-checked"},
+                         facts)
         self.assertIn("model claim", record["claim"])
         found = judgment.verdict(self.store, self.answered()[0]["request_id"])
         self.assertEqual(("observed", "answer", True), (found["state"], found["verdict"], found["valid"]))

@@ -1563,6 +1563,19 @@ class SpecAuthorTests(StoryCase):
         self.assertEqual("unknown", report.state)
         self.assertIn("differ from the spec", " ".join(report.evidence_needs))
 
+    def test_a_return_may_end_a_question_with_a_full_stop_the_file_lacks(self):
+        # design §7 F22 (live hook 22): the file's entry runs on into its options, the return ends the sentence.
+        assignment = self.prep_spec()["assignment_id"]
+        spec_text = SPEC_WITH_QUESTION.replace("Strip whitespace from the name?", "Strip whitespace from the `name`")
+        options = [{"label": "strip", "consequence": "callers get a trimmed name"},
+                   {"label": "keep", "consequence": "the name is used exactly as given"}]
+        report = self.run_spec(assignment, [(SPEC_PATH, spec_text)],
+                               result="needs-decision", questions=["Strip whitespace from the name."],
+                               options=["strip: callers get a trimmed name", "keep: the name is used exactly as given"],
+                               open_questions=[{"id": "Q1", "question": "Strip whitespace from the name.",
+                                                "options": options, "recommendation": "keep"}])
+        self.assertEqual("needs-decision", report.state, report.evidence_needs)
+
     def test_spec_author_completed_return_commits_the_spec_file_only_and_bundles_it(self):
         # the completed attempt first: a refused attempt fences the worktree (as today), so the refusal comes last
         again = self.prep_spec()["assignment_id"]

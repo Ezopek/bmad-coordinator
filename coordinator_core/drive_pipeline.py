@@ -35,6 +35,7 @@ MAX_CORRECTIONS = 6
 PLANNING_MAX_CORRECTIONS = 4   # a planning pipeline validates as before the implementation drive
 MAX_TIMEOUT = 86400
 MAX_TURNS = 1000   # design D25: a role's turn limit
+MAX_COST_USD = 10000   # bill design B5: a story's or an epic's money bound, two decimals at most
 COMMAND_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
 MAX_OUTPUT = 1 << 24
 COMPLETE = ("OBSERVED_COMPLETE_CLAIM", "OBSERVED_PARTIAL_CLAIM")
@@ -47,6 +48,18 @@ def _unsupported(message: str) -> DomainError:
 
 def _invalid(message: str) -> DomainError:
     return DomainError("INVALID_INPUT", message)
+
+
+def cost_bound(value, roles: dict, what: str) -> float:
+    """Bill design B5/B6: a money bound is a number from 0 to MAX_COST_USD with at most two decimals (absent or 0:
+    no bound); above 0 it needs a role whose client reports a money figure, or it could never fire."""
+    if value is None:
+        return 0
+    if type(value) not in (int, float) or value != value or not 0 <= value <= MAX_COST_USD or round(value, 2) != value:
+        raise _invalid(f"{what} must be a number from 0 to {MAX_COST_USD} with at most two decimals")
+    if value > 0 and not any(clients.get(role["client"]).reports_cost for role in roles.values()):
+        raise _invalid(f"{what} needs a role whose client reports cost")
+    return value
 
 
 def _keys(value, required, optional, what: str) -> None:
@@ -282,7 +295,9 @@ def validate(value) -> dict:
         raise _invalid("Pipeline roles must include worker and name only worker, reviewer and judgment")
     for name, role in roles.items():
         _role(name, role)
-    _keys(value["budgets"], ("max_updates", "max_judgments"), ("max_corrections",), "Pipeline budgets")
+    _keys(value["budgets"], ("max_updates", "max_judgments"), ("max_corrections", "max_cost_usd"),
+          "Pipeline budgets")
+    cost_bound(value["budgets"].get("max_cost_usd"), roles, "max_cost_usd")
     _integer(value["budgets"]["max_updates"], 0, MAX_UPDATES, "max_updates")
     _integer(value["budgets"]["max_judgments"], 0, MAX_JUDGMENTS, "max_judgments")
     cap = (MAX_CORRECTIONS, "story") if "project" in value else (PLANNING_MAX_CORRECTIONS, "planning")

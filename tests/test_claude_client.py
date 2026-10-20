@@ -428,6 +428,9 @@ class ClaudeClientTests(Harness):
         launch = self.receipt(report, "launch.json")
         self.assertEqual({"permission_denials": denials, "num_turns": 3, "terminal_reason": "completed",
                           "stop_reason": "end_turn", "models": ["claude-fake-1"], "total_cost_usd": 0.0123,
+                          "usage": {"input_tokens": 1, "output_tokens": 1},   # bill design B2, as the client gives it
+                          "model_usage": {"claude-fake-1": {"inputTokens": 1, "outputTokens": 1, "costUSD": 0.0123}},
+                          "duration_ms": 1500, "duration_api_ms": 1200,
                           "init": {"tools": AUTHOR, "mcp_servers": [], "permissionMode": "acceptEdits",
                                    "cwd": launch["worktree"], "model": "claude-fake-1"},
                           "isolation_gaps": [], "bundle_read_basis": None, "tools": AUTHOR, "tool_check": "passed"},
@@ -513,16 +516,23 @@ class ClaudeClientTests(Harness):
         self.assertEqual("completed-claim", inspect_run(self.t.repo, self.store, assignment).state)
 
     def test_codex_replay_without_client_facts_stays_observed(self):
+        # A Codex return records its usage since bill design B2; a receipt sealed before (no client_facts at all, or
+        # Claude facts without the usage keys) still replays as observed: `facts_agree` compares what the seal has.
         assignment = self.assign()
         report = self.go(assignment, client=clients.DEFAULT, FAKE_WRITE=writes(("result.md", "codex")))
         self.assertEqual("completed-claim", report.state, report.evidence_needs)
         terminal = self.receipt(report)
-        self.assertNotIn("client_facts", terminal)
+        self.assertEqual(["tool_check", "usage"], sorted(terminal["client_facts"]))
         self.assertEqual("codex-cli", terminal["client"])
         self.assertEqual("completed-claim", inspect_run(self.t.repo, self.store, assignment).state)
         self.assertEqual("completed-claim", reconcile_run(self.t.repo, self.store, self.owner, assignment).state)
         historical_return(self.t.repo, self.store, assignment)
+        legacy = {key: value for key, value in terminal.items() if key != "client_facts"}
+        self.reseal(assignment, legacy)
+        self.assertEqual("completed-claim", inspect_run(self.t.repo, self.store, assignment).state)
         self.reseal(assignment, {**terminal, "client_facts": {"tool_check": "passed"}})
+        self.assertEqual("unknown", inspect_run(self.t.repo, self.store, assignment).state)
+        self.reseal(assignment, {**terminal, "client_facts": {"usage": {"input_tokens": 1}, "tool_check": "not-checked"}})
         self.assertEqual("unknown", inspect_run(self.t.repo, self.store, assignment).state)
         self.reseal(assignment, terminal)
         self.assertEqual("completed-claim", inspect_run(self.t.repo, self.store, assignment).state)

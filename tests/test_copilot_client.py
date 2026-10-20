@@ -642,7 +642,11 @@ class CopilotClientTests(Harness):
             created = workspace.read_text().split("created_at: ", 1)[1].strip()
             self.assertEqual({"sessions": [session], "home_session_after": False,
                               "workspace": {"sha256": sha(workspace.read_bytes()), "cwd": launch["worktree"],
-                                            "created_at": created}},
+                                            "created_at": created},
+                              "session_usage": {"usage": {"inputTokens": 2000, "outputTokens": 80,   # bill B2
+                                                          "cacheReadTokens": 900, "cacheWriteTokens": 100,
+                                                          "reasoningTokens": 10},
+                                                "requests": {"claude-fake-1": 1}}},
                              json.loads((directory / "freshness.json").read_bytes()))
             start = datetime.fromisoformat(launch["pre_spawn_at"])
             self.assertGreaterEqual(datetime.fromisoformat(created), start.replace(microsecond=start.microsecond // 1000 * 1000))
@@ -806,6 +810,7 @@ class CopilotClientTests(Harness):
         done = {"type": "tool.execution_complete", "data": {"toolCallId": "x", "success": True}}
         self.assertEqual(["create"], self.terminal([start, write, done, result]).facts["tools"])
         self.assertNotIn("tools", self.terminal([start, result]).facts)
+        self.assertNotIn("session_usage", self.terminal([start, result]).facts)   # bill B2: no session state here
         self.unknown([start, view, done, result])  # a view naming the return path is no return write
         for bad in ({"toolName": ""}, {"toolName": 3}, {"toolName": None}, {}):
             with self.subTest(bad=bad):
@@ -959,6 +964,9 @@ class CopilotClientTests(Harness):
         assignment, report = self.author()
         self.assertEqual("completed-claim", report.state, report.evidence_needs)
         self.assertEqual({"usage": USAGE, "copilotVersion": "9.9.9", "denials": [], "isolation_gaps": [],
+                          "session_usage": {"usage": {"inputTokens": 2000, "outputTokens": 80, "cacheReadTokens": 900,
+                                                      "cacheWriteTokens": 100, "reasoningTokens": 10},
+                                            "requests": {"claude-fake-1": 1}},   # bill design B2: session.shutdown
                           "tool_check": "blocked"}, self.facts(report))
         self.assertEqual(VERSION, self.receipt(report, "launch.json")["cli_version"])  # first line, no update hint
         with patch.dict(os.environ, self.env):

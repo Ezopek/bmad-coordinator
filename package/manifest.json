@@ -5,6 +5,7 @@
     {"source": "package/run.py", "destination": "run.py"},
     {"source": "coordinator_core/__init__.py", "destination": "coordinator_core/__init__.py"},
     {"source": "coordinator_core/__main__.py", "destination": "coordinator_core/__main__.py"},
+    {"source": "coordinator_core/bill.py", "destination": "coordinator_core/bill.py"},
     {"source": "coordinator_core/bmad_contract.py", "destination": "coordinator_core/bmad_contract.py"},
     {"source": "coordinator_core/bmad_implementation.py", "destination": "coordinator_core/bmad_implementation.py"},
     {"source": "coordinator_core/bmad_planning.py", "destination": "coordinator_core/bmad_planning.py"},

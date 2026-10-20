@@ -157,7 +157,7 @@ Copilot cannot review or judge (it has no write-free read-only mode), so those r
 The pipeline is one JSON file, sealed by content hash when the epic binds it, so changing it means a new epic (or, for a running story, a restart). Start from [`examples/greetings/pipeline.json`](../examples/greetings/pipeline.json) and change:
 
 - `roles`: `worker` (implements and writes specs), `reviewer` (spec and code reviews; must differ from the worker's `author_id`, and may be a different client), `judgment` (answers questions under your clauses). Each has `client`, `model`, `timeout` (seconds per attempt) and optionally `max_turns` (Claude only). The worker role may add `"web": true` to let a Claude worker use `WebFetch`/`WebSearch` and a Codex worker reach the network from its sandbox.
-- `budgets`: `max_updates` (continuations of one attempt chain: answered questions, empty attempts, client stops), `max_judgments` (judgment calls per story run), `max_corrections` (rounds after a red verify or a blocking review; absent means zero, at most six).
+- `budgets`: `max_updates` (continuations of one attempt chain: answered questions, empty attempts, client stops), `max_judgments` (judgment calls per story run), `max_corrections` (rounds after a red verify or a blocking review; absent means zero, at most six), and optionally `max_cost_usd` (a money bound per story on what the clients report, two decimals at most; it needs a Claude Code role, the only client that reports a USD figure; the run stops `cost-budget` before the launch that would exceed it; see [Costs](#costs)).
 - `accept_on_high`: `false` stops the run on an open `high` finding for you to decide; `true` accepts with the findings listed.
 - `spec_auto_accept`: `false` stops after each reviewed spec so that you read it and accept (it becomes the delegated authority for the implementation); `true` lets the driver accept.
 - `project`: `setup` and `verify` commands (`{name, argv, timeout_seconds}`, run without a shell in the story worktree; `{changed_files}` in an `argv` expands to the attempt's changed files, `{main_worktree}` to the main checkout), `env` (variables copied to the commands and the worker beside `PATH` and `HOME`), `commit_identity`, `output_limit_bytes` (captured output per command), `rules` (files the worker reads first, such as your `AGENTS.md`), optional `context` (files the spec author reads first, such as a PRD or an architecture note), optional `artifacts_dir` and `briefs_dir`.
@@ -167,7 +167,7 @@ The deadline you pass to `epic start` must be at least the largest role timeout 
 
 ### The epic input
 
-Start from [`examples/greetings/epic-input.json`](../examples/greetings/epic-input.json): `epics_path`, `epic` (the number), `worktrees_dir` (an absolute directory outside the repository; the epic and story worktrees are created in it), optional `branch` (default `coordinator/epic-<N>`) and `base` (default `HEAD`), `story_defaults` and optional per-story `stories.<key>` overrides, including `roles` (`timeout` and `max_turns` per role for one story). A story that is already `done` in the sprint status is skipped; one that is neither `backlog` nor `done` stops the run.
+Start from [`examples/greetings/epic-input.json`](../examples/greetings/epic-input.json): `epics_path`, `epic` (the number), `worktrees_dir` (an absolute directory outside the repository; the epic and story worktrees are created in it), optional `branch` (default `coordinator/epic-<N>`) and `base` (default `HEAD`), optional `budgets` (`{"max_cost_usd": N}`, a money bound for the whole epic; raised later with `epic resume --max-cost-usd N`), `story_defaults` and optional per-story `stories.<key>` overrides, including `budgets` and `roles` (`timeout` and `max_turns` per role for one story). A story that is already `done` in the sprint status is skipped; one that is neither `backlog` nor `done` stops the run.
 
 ### Running
 
@@ -207,7 +207,9 @@ Exit `10` (`continue`) needs only `epic resume`. The full table with every reaso
 
 ### Costs
 
-Observed, with the clients' own cost reports; your models and stories will differ.
+`run bill --epic <id>` prints the bill of an epic from the receipts: every launch with its wall clock and what the client reported (Claude Code a USD figure and tokens, Copilot premium requests and tokens, Codex tokens), the sums per story, role and client/model, and beside every sum the number of launches that reported nothing, so a silent client never reads as free. The same numbers end every summary and the spec's `## Coordinator Result`. The coordinator never turns tokens into money itself; USD appears where the client said it, and Claude's figure is its list price, not what a subscription invoices. A money bound stops a run before the launch that would exceed it: `budgets.max_cost_usd` in the pipeline per story, `budgets.max_cost_usd` in the epic input for the whole epic; the stop is `cost-budget`, and [Troubleshooting](troubleshooting.md#during-a-run) has the way out.
+
+Observed before the bill existed, with the clients' own cost reports read by hand; your models and stories will differ.
 
 | Run | Launches | Cost |
 | --- | --- | --- |

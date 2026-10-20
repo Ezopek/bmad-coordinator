@@ -668,7 +668,7 @@ class PipelineLoopTests(Base):
         self.assertEqual({"kind", "format", "lease_id", "run_id", "feature_id", "generation", "pipeline_sha256",
                           "outcome", "reason", "subjects", "operator_action", "ownership", "ownership_reason",
                           "decisions", "counts", "steps", "restarts", "interventions", "acknowledged_stops",
-                          "ended_at"}, set(summary))
+                          "ended_at", "bill"}, set(summary))   # bill design B4
         self.assertEqual((3, {"worker": 1}), (summary["restarts"], summary["counts"]["launches"]))
 
     def test_interventions_typed_including_attempt_resolve_and_attended_generation(self):

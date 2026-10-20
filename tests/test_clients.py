@@ -11,6 +11,7 @@ import sqlite3
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -140,6 +141,24 @@ class GoldenCodexTests(PlanningCase):
         self.assertEqual((golden / "spec_sha256.txt").read_text().strip(), json.loads(binding.read_bytes())["spec_sha256"])
 
 
+class CodexUsageTests(unittest.TestCase):
+    """Bill design B2: the Codex terminal records the turn's `usage` as given, and nothing when the event has none."""
+
+    def terminal(self, completed: dict) -> clients.Terminal:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "events.jsonl").write_text(json.dumps({"type": "thread.started", "thread_id": "t1"}) + "\n" +
+                                                  json.dumps({"type": "turn.completed", **completed}) + "\n")
+            (run_dir / "last.json").write_bytes(b'{"result": "completed"}')
+            return clients._codex_terminal(run_dir, {})
+
+    def test_turn_usage_recorded_as_given_or_absent(self):
+        usage = {"input_tokens": 7, "cached_input_tokens": 2, "output_tokens": 3}
+        self.assertEqual(("t1", {"usage": usage}), (lambda t: (t.thread_id, t.facts))(self.terminal({"usage": usage})))
+        self.assertEqual({}, self.terminal({}).facts)
+        self.assertEqual({}, self.terminal({"usage": "not an object"}).facts)
+
+
 class ClientTests(Harness):
     def set_reserved(self, assignment, source):
         with closing(sqlite3.connect(self.store.path)) as conn, conn:
@@ -213,7 +232,9 @@ class ClientTests(Harness):
                          (launch["client"], launch["binary"], launch["cli_version"], launch["source_id"]))
         self.assertEqual(launch["binary"], launch["argv"][0])
         self.assertEqual(("codex-cli", "codex-cli:" + terminal["thread_id"]), (terminal["client"], terminal["source_id"]))
-        self.assertNotIn("client_facts", terminal)
+        self.assertEqual({"usage": {"input_tokens": 1000, "cached_input_tokens": 400, "cache_write_input_tokens": 0,
+                                    "output_tokens": 50, "reasoning_output_tokens": 5}, "tool_check": "not-checked"},
+                         terminal["client_facts"])   # bill design B2: Codex's own counts from turn.completed
         self.assertEqual("not-checked", clients.recorded_tool_check(terminal))
         t = self.tree("alt")
         _, report = self.completed(t, "alt", client="alt-stdout")
@@ -321,7 +342,7 @@ class ClientTests(Harness):
         launch, terminal = self.receipt(report, "launch.json"), self.receipt(report)
         legacy_launch = {key: value for key, value in launch.items() if key not in ("client", "binary")}
         legacy_launch["argv"] = ["codex", *launch["argv"][1:]]
-        legacy_return = {key: value for key, value in terminal.items() if key != "client"}
+        legacy_return = {key: value for key, value in terminal.items() if key not in ("client", "client_facts")}
         legacy_return["launch_sha256"] = sha(canonical(legacy_launch))
         self.assertEqual(set(json.loads((GOLDEN / "generic" / "launch-keys.json").read_text())), set(legacy_launch))
         self.assertEqual(set(json.loads((GOLDEN / "generic" / "return-keys.json").read_text())), set(legacy_return))
@@ -796,7 +817,7 @@ class ClientTests(Harness):
                           "max_envelope_bytes", "write_free_readonly", "max_turns_default", "env", "env_unset",
                           "run_subdirs", "private_subdirs", "observation_name", "internal_tools", "run_env",
                           "allowed_tools", "argv", "launch_facts", "observe", "terminal", "env_keep", "session_scrub",
-                          "script_launcher"],
+                          "script_launcher", "reports_cost"],
                          [item.name for item in fields(clients.Client)])
         self.assertEqual(["binary", "mode", "worktree", "run_dir", "schema", "model", "max_turns", "session_id",
                           "read_dirs", "commands", "isolated", "return_path", "web"],

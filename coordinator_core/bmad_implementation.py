@@ -1957,7 +1957,8 @@ def write_spec_result(text: str, status: str, result: dict | None) -> str:
         section = ["", "## Coordinator Result", "", f"- acceptance: `{result['acceptance_id']}`",
                    f"- accepted commit: `{result['commit_sha']}`", f"- review: `{result['review_id']}`",
                    "- verification: " + ", ".join(result.get("verify", [])),
-                   "- decisions: " + (", ".join(result.get("decisions", [])) or "none"), ""]
+                   "- decisions: " + (", ".join(result.get("decisions", [])) or "none"),
+                   *([f"- bill: {result['bill']}"] if result.get("bill") else []), ""]
         text = text.rstrip("\n") + "\n" + "\n".join(section)
     return _styled(bom, eol, text)
 
@@ -2044,7 +2045,8 @@ def sync_status(repo, store, owner, feature: dict, phase: str, project: dict, re
                 raise _shape(f"{path} is a symlink")
             if path != ledger:
                 try:
-                    texts[path] = (worktree / path).read_text(encoding="utf-8", newline="")
+                    with open(worktree / path, encoding="utf-8", newline="") as stream:   # Path.read_text(newline=)
+                        texts[path] = stream.read()                                       # is 3.13+; the floor is 3.11
                 except (OSError, UnicodeDecodeError) as exc:
                     raise _shape(f"cannot read {path}") from exc
         if phase == "spec":   # ruling P11: a run killed after the rewrite left HEAD's spec with the status flipped

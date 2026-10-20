@@ -111,7 +111,7 @@ def claude_emit(emit, preset, permission, requested, mode, payload, cwd):
         return
     result = {'type': 'result', 'subtype': os.environ.get('FAKE_SUBTYPE', 'success'), 'is_error': mode == 'is-error',
               'session_id': session, 'result': 'done', 'num_turns': 3, 'stop_reason': 'end_turn',
-              'terminal_reason': 'completed', 'total_cost_usd': 0.0123,
+              'terminal_reason': 'completed', 'total_cost_usd': 0.0123, 'duration_ms': 1500, 'duration_api_ms': 1200,
               'permission_denials': json.loads(os.environ.get('FAKE_DENIALS', '[]')),
               'modelUsage': {'claude-fake-1': {'inputTokens': 1, 'outputTokens': 1, 'costUSD': 0.0123}},
               'usage': {'input_tokens': 1, 'output_tokens': 1}}
@@ -247,6 +247,10 @@ def copilot_emit(emit, session, mode, payload, cwd, home, target, launcher):
         session, '/elsewhere' if mode == 'cwd-mismatch' else cwd,
         created.isoformat(timespec='milliseconds').replace('+00:00', 'Z')))
     (home.parent / 'copilot-logs' / 'process.log').write_text('fake log\n')
+    (state / session / 'events.jsonl').write_text(json.dumps({'type': 'session.start', 'data': {}}) + '\n' + json.dumps(
+        {'type': 'session.shutdown', 'data': {'usage': {'inputTokens': 2000, 'outputTokens': 80, 'cacheReadTokens': 900,
+                                                        'cacheWriteTokens': 100, 'reasoningTokens': 10},
+                                              'requests': {'claude-fake-1': 1}}}) + '\n')
     if mode == 'preexisting-session':
         (state / str(uuid.uuid4())).mkdir()
     if mode == 'home-leak':
@@ -396,7 +400,9 @@ if PROTOCOL == 'codex-cli':
     last.write_text(json.dumps(payload))
     emit({'type': 'thread.started', 'thread_id': session})
     if mode != 'truncated':
-        emit({'type': 'turn.completed'})
+        emit({'type': 'turn.completed', 'usage': {'input_tokens': 1000, 'cached_input_tokens': 400,
+                                                  'cache_write_input_tokens': 0, 'output_tokens': 50,
+                                                  'reasoning_output_tokens': 5}})
 elif PROTOCOL == 'claude-code':
     claude_emit(emit, session, permission, requested, mode, payload, cwd)
 elif PROTOCOL == 'copilot':

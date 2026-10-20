@@ -100,7 +100,9 @@ if envelope.get('kind') == 'coordinator-judgment-request':
         assert '--skip-git-repo-check' in args
         pathlib.Path(args[args.index('--output-last-message') + 1]).write_text(json.dumps(payload))
         emit({'type': 'thread.started', 'thread_id': uuid.uuid4().hex})
-        emit({'type': 'turn.completed'})
+        emit({'type': 'turn.completed', 'usage': {'input_tokens': 1000, 'cached_input_tokens': 400,
+                                                  'cache_write_input_tokens': 0, 'output_tokens': 50,
+                                                  'reasoning_output_tokens': 5}})   # bill design B2, as the fake
     sys.exit(0)
 key = pathlib.PurePosixPath(envelope['brief_ref']).stem
 match = re.fullmatch(r'drv-[0-9a-f]{12}-(.+)-([0-9]+)', key)
@@ -363,6 +365,7 @@ class DriveCase(ReviewCase):
         if stdin is not None:
             child.stdin.write(stdin)
             child.stdin.close()
+            child.stdin = None   # Python 3.11's communicate() flushes a still-set stdin and fails on a closed one
         return child
 
     def finish(self, child, timeout=120):
