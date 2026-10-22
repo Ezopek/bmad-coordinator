@@ -820,7 +820,7 @@ class ClientTests(Harness):
                           "max_envelope_bytes", "write_free_readonly", "max_turns_default", "env", "env_unset",
                           "run_subdirs", "private_subdirs", "observation_name", "internal_tools", "run_env",
                           "allowed_tools", "argv", "launch_facts", "observe", "terminal", "env_keep", "session_scrub",
-                          "script_launcher", "reports_cost", "boundary_state"],
+                          "script_launcher", "reports_cost", "boundary_state", "read_mode"],
                          [item.name for item in fields(clients.Client)])
         self.assertEqual(["binary", "mode", "worktree", "run_dir", "schema", "model", "max_turns", "session_id",
                           "read_dirs", "commands", "isolated", "return_path", "web"],

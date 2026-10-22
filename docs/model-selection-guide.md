@@ -8,7 +8,7 @@ Status: guidance distilled on **2026-10-10** from the retained live evidence (80
 - **`claude-code`** gets `--model M`. The aliases `sonnet` and `opus` are resolved by the CLI; the result record names the model that actually ran (`claude-sonnet-5-5`, `claude-opus-5-5` in every retained run, Claude Code 2.1.289–2.1.295).
 - **`codex-cli`** gets `-m M`; the operator's `~/.codex/config.toml` default (`gpt-6-astra`, `model_reasoning_effort = "high"`) applies only to what the pipeline leaves unset, which is the reasoning effort.
 - **`copilot`** gets `--model M` with Copilot's own labels (`claude-sonnet-5` in every retained run); routing is plan-dependent and each launch is one premium request.
-- The client, not the model, decides the mode: `claude-code` and `codex-cli` have a write-free read-only mode (reviews, judgments); `copilot` is author-only (`UNSUPPORTED_CLIENT_MODE` for `reviewer` or `judgment`).
+- The client, not the model, decides the mode: `claude-code` and `codex-cli` have a write-free read-only mode (reviews, judgments); `copilot` is an author, and a judge only in its read mode inside the launch boundary (`"mode": "read"`, `"boundary": "bwrap"` on the `judgment` role; qualified on 1.0.91). It cannot review yet (`UNSUPPORTED_CLIENT_MODE`/`UNSUPPORTED_STEP` for `reviewer`).
 
 ## 2. What each role needs from a model
 

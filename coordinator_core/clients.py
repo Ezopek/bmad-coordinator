@@ -98,6 +98,7 @@ class Client:
                                                  # RUN/worker-tools/bmad-script (Copilot, design section 14)
     reports_cost: bool = False                   # bill design B5: the client reports a money figure (USD)
     boundary_state: Callable[[str, dict], list] | None = None   # launch-boundary L3: runtime and state mounts
+    read_mode: bool = False                      # Copilot reviewer design V1: an isolated `read` launch exists
 
 
 @dataclass(frozen=True)
@@ -709,10 +710,179 @@ COPILOT_TOKEN_WARNING = ("COPILOT_GITHUB_TOKEN is not set: headless auth falls b
 MAX_WORKSPACE_BYTES = 1 << 16
 
 
+# Copilot reviewer design revision 6 (V4, V5, V6, V7): the `read` mode. Only view, grep and glob are offered, the
+# verdict is the final root answer, and the stream is parsed against the record types the 1.0.91 probe showed
+# (project history, 2026-10-23-copilot-read). READ_QUALIFIED lists the versions on which the qualification probe
+# passed; COORDINATOR_QUALIFY_READ=1 (the operator's --qualify) launches another one as a qualification run, which
+# is never observed.
+READ_TOOLS = ("glob", "grep", "view")
+READ_CONTRACT = "copilot-read-1"
+READ_RECORD_TYPES = frozenset({
+    "session.managed_settings_resolved", "session.info", "session.mcp_servers_loaded", "session.tools_updated",
+    "user.message", "assistant.turn_start", "model.call_start", "assistant.tool_call_delta", "model.call_finished",
+    "assistant.message", "tool.execution_start", "model.call_final_result", "tool.execution_complete",
+    "assistant.turn_end", "assistant.message_start", "assistant.message_delta", "session.usage_checkpoint",
+    "assistant.idle", "result",
+    # seen by the qualification runs of 2026-10-23 (project history, 2026-10-23-copilot-read): the model's reasoning
+    # and the CLI's own workspace index status; neither is a tool call
+    "assistant.reasoning", "assistant.reasoning_delta", "session.indexed_search"})
+# Qualified 2026-10-23 for the judgment profile (project history, 2026-10-23-copilot-read/qualification-report):
+# P3 confinement, P4 a judgment, P6 replay passed on 1.0.91. The reviewer's read mode, refused for now, needs its
+# own gates (P1, P2, P5) before it may rely on this entry.
+READ_QUALIFIED: dict[str, str] = {"1.0.91": READ_CONTRACT}
+QUALIFY_ENV = "COORDINATOR_QUALIFY_READ"
+
+
+def read_version(version: str) -> str | None:
+    found = re.search(r"(\d+\.\d+\.\d+)", version or "")
+    return found.group(1) if found else None
+
+
+def read_ready(client: Client, version: str) -> bool:
+    """V7: whether a `read` launch may run on this version; False means a qualification run (never observed) when
+    the operator set COORDINATOR_QUALIFY_READ=1, and a refusal otherwise."""
+    if not client.read_mode:
+        raise DomainError("UNSUPPORTED_CLIENT_MODE", f"Worker client {client.name} has no read mode")
+    if read_version(version) in READ_QUALIFIED:
+        return True
+    if os.environ.get(QUALIFY_ENV) == "1":
+        return False
+    raise DomainError("UNSUPPORTED_CLIENT_MODE", f"{client.name} read mode is not qualified on {version!r}; a "
+                      f"qualification run needs {QUALIFY_ENV}=1 (Copilot reviewer design V7)")
+
+
+def _copilot_read_argv(spec: LaunchSpec) -> list[str]:
+    return [spec.binary, "-p", ENVELOPE_ARG, "--output-format", "json", "--session-id", spec.session_id,
+            "--model", spec.model, *COPILOT_ISOLATION, "--available-tools", ",".join(READ_TOOLS),
+            "--log-dir", str(spec.run_dir / "copilot-logs"), "-C", str(spec.worktree)]
+
+
+def _read_tools_offered(data: dict) -> set[str] | None:
+    """The offered tool names of a usage checkpoint, or None when its shape is not the one the contract knows."""
+    states = data.get("promptCacheBreakState")
+    if not isinstance(states, list) or not states:
+        return None
+    names = set()
+    for state in states:
+        models = state.get("models") if isinstance(state, dict) else None
+        if not isinstance(models, dict) or not models:
+            return None
+        for model in models.values():
+            tools = model.get("tools") if isinstance(model, dict) else None
+            if not isinstance(tools, list) or any(not isinstance(item, dict) or not isinstance(item.get("name"), str)
+                                                  for item in tools):
+                return None
+            names |= {item["name"] for item in tools}
+    return names
+
+
+def _read_answer(text: object) -> bytes:
+    """V6: the final answer is exactly one JSON object, bare or in one fenced json block with nothing around it."""
+    if not isinstance(text, str):
+        raise ValueError("the final answer has no text")
+    body = text.strip()
+    fenced = re.fullmatch(r"```(?:json)?\s*\n(.*)\n```", body, re.S)
+    body = fenced.group(1).strip() if fenced else body
+    value = json.loads(body, object_pairs_hook=_unique_keys, parse_constant=_no_constant)   # one reading for all
+    if not isinstance(value, dict):
+        raise ValueError("the final answer is not one JSON object")
+    return body.encode("utf-8")
+
+
+def _unique_keys(pairs: list) -> dict:
+    """A JSON object read one way by every reader: a repeated key is refused, never resolved to the last one."""
+    keys = [key for key, _ in pairs]
+    if len(keys) != len(set(keys)):
+        raise ValueError("the final answer repeats a key")
+    return dict(pairs)
+
+
+def _no_constant(name: str):
+    raise ValueError(f"the final answer holds {name}, which is not JSON")
+
+
+def _copilot_read_terminal(run_dir: Path, launch: dict) -> Terminal:
+    """V5, V6 over the retained stream: only the contract's record types; one `result`, last, exit 0, the preset
+    session; a recognised usage checkpoint offering exactly view, grep and glob; every tool start one of them with a
+    path that names a staged file or a staged directory (never the cwd itself or .git), every completion answering
+    a start, nothing attributed to a subagent, every MCP server disabled; the final root answer one JSON object.
+    `facts["reads"]` maps each staged file a successful `view` returned in full to that content's sha256."""
+    try:
+        seen = jsonl_records(run_dir / "events.jsonl")
+        session = launch.get("session_id")
+        cwd = Path(launch.get("cwd") or "")
+        staged = set(launch.get("read_paths") or [])
+        if not isinstance(session, str) or not cwd.is_absolute():
+            raise ValueError("launch receipt lacks the preset session or the cwd")
+        unknown_types = sorted({item["type"] for item in seen} - READ_RECORD_TYPES)
+        if unknown_types:
+            raise ValueError("record types outside the read contract: " + ", ".join(unknown_types))
+        if [index for index, item in enumerate(seen) if item["type"] == "result"] != [len(seen) - 1]:
+            raise ValueError("stream lacks exactly one result as its last record")
+        result = seen[-1]
+        if result.get("sessionId") != session or type(result.get("exitCode")) is not int or result["exitCode"] != 0:
+            raise ValueError("the result names another session or a non-zero exit")
+        offered, starts, reads, answer = None, {}, {}, None
+        dirs = {str(parent) for path in staged for parent in Path(path).parents if str(parent) != "."}
+        for item in seen:
+            data = item.get("data") if isinstance(item.get("data"), dict) else {}
+            if "parentToolCallId" in data or "agentId" in data:
+                raise ValueError("a record is attributed to a subagent")
+            kind = item["type"]
+            if kind == "session.usage_checkpoint":
+                offered = _read_tools_offered(data)
+                if offered is None:
+                    raise ValueError("the usage checkpoint has a shape the read contract does not know")
+            elif kind == "session.mcp_servers_loaded":
+                servers = data.get("servers") if isinstance(data.get("servers"), list) else []
+                if any(not isinstance(server, dict) or server.get("status") != "disabled" for server in servers):
+                    raise ValueError("an MCP server was loaded")
+            elif kind == "tool.execution_start":
+                name, arguments = data.get("toolName"), data.get("arguments")
+                path = arguments.get("path") if isinstance(arguments, dict) else None
+                if name not in READ_TOOLS or not isinstance(path, str) or not path:
+                    raise ValueError(f"a tool call outside the read set or without a path: {name}")
+                full = Path(os.path.normpath(path if os.path.isabs(path) else cwd / path))
+                relative = full.relative_to(cwd).as_posix() if full.is_relative_to(cwd) else None
+                if relative is None or (relative not in staged and relative not in dirs and
+                                        not (relative == "." and name == "view")):   # a listing of the cwd itself
+                    raise ValueError(f"a tool call reads outside the staged inputs: {path}")
+                starts[data.get("toolCallId")] = (name, relative, arguments)
+            elif kind == "tool.execution_complete":
+                call = starts.get(data.get("toolCallId"))
+                if call is None:
+                    raise ValueError("a tool completion answers no start")
+                content = (data.get("result") or {}).get("content") if isinstance(data.get("result"), dict) else None
+                if call[0] == "view" and call[1] in staged and data.get("success") is True and isinstance(content, str):
+                    reads[call[1]] = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            elif kind == "assistant.message":
+                if data.get("toolRequests"):
+                    continue
+                if data.get("chunkCount") not in (None, 1) or data.get("phase") is not None:
+                    raise ValueError("a phased or chunked answer is outside the read contract")
+                answer = data.get("content")
+        if offered != set(READ_TOOLS):
+            raise ValueError("the offered tools were not observed as exactly view, grep and glob")
+        final = _read_answer(answer)
+        _copilot_fresh(run_dir, launch, session)   # section 14: one fresh session of the per-run home, no $HOME leak
+        session_usage = json.loads((run_dir / "freshness.json").read_bytes()).get("session_usage")
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise _unknown(f"Read-mode stream invalid: {exc}") from exc
+    usage = result.get("usage") if isinstance(result.get("usage"), dict) else None
+    facts = {"read_contract": READ_CONTRACT, "offered_tools": sorted(offered),
+             "tools": sorted({call[0] for call in starts.values()}), "reads": dict(sorted(reads.items())),
+             "usage": usage}
+    if isinstance(session_usage, dict):   # bill design B2, from the sealed observation
+        facts["session_usage"] = session_usage
+    return Terminal(session, final, facts)
+
+
 def _copilot_argv(spec: LaunchSpec) -> list[str]:
     """Author only (K1): the pinned tool set, write approval for the return file, for a bound author the launcher's
     bare-name shell rule plus a stdin-only sha256sum (never `uv`), write deny rules for the protected paths, and
     RUN/worker-return as the only added directory. No reviewer or isolated argv exists."""
+    if spec.isolated and spec.mode == "read":   # Copilot reviewer design V4
+        return _copilot_read_argv(spec)
     if spec.isolated or spec.mode != "workspace-write" or not spec.return_path:
         raise DomainError("UNSUPPORTED_CLIENT_MODE", "Worker client copilot has no write-free read-only mode")
     rules = [f"shell({LAUNCHER_NAME})", "shell(sha256sum)"] if spec.commands else []
@@ -947,6 +1117,8 @@ def _copilot_terminal(run_dir: Path, launch: dict) -> Terminal:
     the pinned author set (recorded as offered_tools). MCP servers (except those reported disabled), hooks and
     subagents are isolation gaps. The final bytes come only from the return file, never from an assistant message. A
     refusal names its specific cause."""
+    if launch.get("requested_mode") == "read":   # Copilot reviewer design V5, V6
+        return _copilot_read_terminal(run_dir, launch)
     try:
         seen = jsonl_records(run_dir / "events.jsonl")
         session, return_path = launch.get("session_id"), launch.get("return_path")
@@ -1037,9 +1209,11 @@ COPILOT = Client(
     env_unset=frozenset({"COPILOT*", "COPILOT_ALLOW_ALL"}), env_keep=frozenset({"COPILOT_GITHUB_TOKEN"}),
     session_scrub=PARENT_MARKERS,
     run_subdirs=("copilot-home", "copilot-logs", WORKER_RETURN), private_subdirs=("copilot-home", "copilot-logs"),
+    read_mode=True,   # Copilot reviewer design revision 6: isolated `read` launches, under the boundary only
     observation_name="freshness.json", internal_tools=COPILOT_TOOLS,  # narrowed P0c vocabulary (R2a), reviewed
     run_env=_copilot_run_env,
-    allowed_tools=lambda mode: COPILOT.internal_tools if mode == "workspace-write" else frozenset(),
+    allowed_tools=lambda mode: COPILOT.internal_tools if mode == "workspace-write" else
+    frozenset(READ_TOOLS) if mode == "read" else frozenset(),
     argv=_copilot_argv, launch_facts=_copilot_launch_facts, observe=_copilot_observe, terminal=_copilot_terminal,
     script_launcher=True)
 REGISTRY: dict[str, Client] = {CODEX.name: CODEX, CLAUDE.name: CLAUDE, COPILOT.name: COPILOT}  # closed; tests may
@@ -1767,11 +1941,21 @@ def _schema_keys(final: object, schema: dict) -> dict:
 
 def run_isolated(client: str, target: RepoIdentity, root: Path, cwd: Path, receipt_dir: Path, envelope: dict,
                  schema: dict, model: str, timeout_seconds: int, max_turns: int | None = None,
-                 boundary_kind: str | None = None) -> IsolatedRun:
+                 boundary_kind: str | None = None, mode: str | None = None,
+                 required_reads: tuple = ()) -> IsolatedRun:
     """D17: one read-only process outside any project; no assignment, fence or DB anchor. Receipts stay in
-    receipt_dir; the caller copies and anchors them. `observed` means well-formed sealed transport only."""
+    receipt_dir; the caller copies and anchors them. `observed` means well-formed sealed transport only.
+
+    `mode="read"` (Copilot reviewer design revision 6) is the read mode of a client that has one: inside the launch
+    boundary only, on a qualified version (else a qualification run, never observed), the verdict from the final
+    answer, and every `required_reads` file (relative to the cwd) read in full."""
     chosen = get(client)
-    if not chosen.write_free_readonly:
+    if mode not in (None, "read"):
+        raise DomainError("INVALID_INPUT", "Isolated run mode must be read or absent")
+    if mode == "read" and (not chosen.read_mode or boundary.check_kind(boundary_kind) is None):
+        raise DomainError("UNSUPPORTED_CLIENT_MODE", f"Worker client {chosen.name} has no read mode outside the "
+                          "launch boundary")
+    if mode is None and not chosen.write_free_readonly:
         raise DomainError("UNSUPPORTED_CLIENT_MODE", f"Worker client {chosen.name} has no write-free read-only mode")
     if type(model) is not str or not model.strip() or model.startswith("-") or type(timeout_seconds) is not int or \
        timeout_seconds <= 0 or not isinstance(envelope, dict) or not isinstance(schema, dict):
@@ -1784,6 +1968,9 @@ def run_isolated(client: str, target: RepoIdentity, root: Path, cwd: Path, recei
     if chosen.max_envelope_bytes is not None and len(data) > chosen.max_envelope_bytes:
         raise DomainError("INVALID_INPUT", "Envelope exceeds the client's envelope limit")
     binary, version = preflight(chosen)
+    qualified = read_ready(chosen, version) if mode == "read" else True
+    staged = sorted(path.relative_to(cwd).as_posix() for path in Path(cwd).rglob("*")
+                    if path.is_file() and ".git" not in path.relative_to(cwd).parts) if mode == "read" else []
     plan = plan_boundary(boundary_kind, chosen, binary, boundary.project_mounts("isolated", receipt_dir, Path(cwd)),
                          [target.common_dir, *[Path(line[len("worktree "):]) for line in
                                                _git_lines(target.worktree, "worktree", "list", "--porcelain")
@@ -1803,7 +1990,7 @@ def run_isolated(client: str, target: RepoIdentity, root: Path, cwd: Path, recei
     if chosen.return_source == "client-file":
         private_file(receipt_dir / "last.json", b"")
     session = str(uuid.uuid4()) if chosen.presets_session else None
-    spec = LaunchSpec(binary, "read-only", cwd, receipt_dir, schema, model,
+    spec = LaunchSpec(binary, "read" if mode == "read" else "read-only", cwd, receipt_dir, schema, model,
                       max_turns if max_turns is not None else chosen.max_turns_default, session, (), (),
                       isolated=True)
     argv = chosen.argv(spec)
@@ -1844,6 +2031,8 @@ def run_isolated(client: str, target: RepoIdentity, root: Path, cwd: Path, recei
                 launch["max_turns"] = spec.max_turns
             if record is not None:   # launch-boundary L5, inside the launch digest
                 launch["boundary"] = record
+            if mode == "read":   # Copilot reviewer design V2, V7: the staged inputs and a qualification run
+                launch.update(read_paths=staged, required_reads=list(required_reads), qualification=not qualified)
             launch_digest = seal(receipt_dir / "launch.json", launch)
             if scrub is not None:
                 seal(receipt_dir / "env-scrub.json", scrub)
@@ -1892,15 +2081,19 @@ def run_isolated(client: str, target: RepoIdentity, root: Path, cwd: Path, recei
         terminal = chosen.terminal(receipt_dir, launch)
         if terminal.stop is not None:   # design D25: an isolated run saves nothing; a stop is unknown
             raise _unknown(STOPPED)
-        if chosen.return_source == "stdout":
+        if chosen.return_source == "stdout" or mode == "read":   # V6: the read mode's return is the final answer
             private_file(receipt_dir / "last.json", terminal.final)
         elif chosen.return_source != "client-file":
             raise _unknown("Isolated runs take client-file or stdout returns only")
+        for relative in required_reads if mode == "read" else ():   # V5: every required file read in full
+            if terminal.facts.get("reads", {}).get(relative) != \
+               hashlib.sha256((cwd / relative).read_bytes()).hexdigest():
+                raise _unknown(f"The read-mode client did not read {relative} in full")
         last = (receipt_dir / "last.json").read_bytes()
         if last != terminal.final:
             raise _unknown("Final message differs from the client terminal")
         final = _schema_keys(json.loads(last), schema)
-        facts = client_facts(chosen, "read-only", terminal)
+        facts = client_facts(chosen, spec.mode, terminal)
         if facts:
             extras["client_facts"] = facts
         source = source_id(chosen.name, terminal.thread_id)
@@ -1911,6 +2104,9 @@ def run_isolated(client: str, target: RepoIdentity, root: Path, cwd: Path, recei
             "events_sha256": hashlib.sha256((receipt_dir / "events.jsonl").read_bytes()).hexdigest(),
             "last_sha256": hashlib.sha256(last).hexdigest(), "before": stamp_json(before), "after": stamp_json(after),
             "ended_at": _now(), **extras})
+        if not qualified:   # Copilot reviewer design V1: a qualification run passes its checks and is never observed
+            return IsolatedRun("unknown", source, final, str(receipt_dir), launch_digest, return_digest,
+                               ["qualification run: every check passed; never observed (Copilot reviewer design V1)"])
         return IsolatedRun("observed", source, final, str(receipt_dir), launch_digest, return_digest, [])
     except (OSError, ValueError, DomainError) as exc:
         return unknown(str(exc))

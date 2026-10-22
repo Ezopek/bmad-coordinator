@@ -670,6 +670,8 @@ class Run:
         if action["fresh"]:
             try:   # launch-boundary L7: the boundary checked before the key is reserved
                 clients.boundary_ready(role.get("boundary"), clients.get(role["client"]), self.repo)
+                if role.get("mode") == "read":   # Copilot reviewer design V7, V8: the version, before the key
+                    clients.read_ready(clients.get(role["client"]), clients.preflight(clients.get(role["client"]))[1])
                 judgment.prepare(self.repo, self.store, self.owner, self.feature_id, action["request_id"],
                                  self.lease["pipeline_sha256"], step.step_id, action["key"],
                                  self.lease["judgment_root"], hook=_hook)

@@ -31,7 +31,8 @@ class Parser(argparse.ArgumentParser):
         raise DomainError("INVALID_INPUT", "Invalid command arguments")
 
 
-CLIENT_HELP = ("worker client: codex-cli (default), claude-code or copilot (authors only); must match a bound "
+CLIENT_HELP = ("worker client: codex-cli (default), claude-code or copilot (authors, and judgments in read mode); "
+               "must match a bound "
                "assignment's client")
 TURNS_HELP = "claude-code only (default 60); refused for codex-cli and copilot"
 BOUNDARY_HELP = ("run the client in a bubblewrap sandbox (launch-boundary design); a binding that names a boundary "

@@ -85,6 +85,14 @@ SCHEMA_V3 = {
                            **{name: {"type": "string"} for name in DEFERRED_FIELDS[1:]}}}},
         "rationale": {"type": "string"}, "refusal": {"type": "string"}}}
 SCHEMAS = {SCHEMA_NAME: SCHEMA, SCHEMA_NAME_V2: SCHEMA_V2, SCHEMA_NAME_V3: SCHEMA_V3}
+# Copilot reviewer design revision 6 (V5, V6): a read-mode judgment must read these in full, and answers in its
+# final message, since it has no tool to write a return and no client schema flag.
+READ_REQUIRED = ("question.json", "mandate.json", "decisions.json")
+READ_RULES = ("You have only the view, grep and glob tools. Read exactly these three files, each once and in full "
+              "with view (pass forceReadLargeFiles for a large file): `{cwd}/question.json`, `{cwd}/mandate.json` and "
+              "`{cwd}/decisions.json`. Do not view, grep or glob any other path: not the directory itself, not its "
+              ".git, not /dev/null, not a path a file names; any other path voids your answer. Your final message is "
+              "your answer: exactly one JSON object for `return_schema`, with nothing before or after it.")
 OFFERED = SCHEMA_NAME_V2  # planning requests (judgment-v2 design D3); a sealed request keeps the schema it names
 BINDING_CATEGORIES = (
     "persisted data shape (schemas, migrations, stored formats)",
@@ -778,12 +786,16 @@ def run(repo, store, owner, key: str, role: dict, root=None, hook=None):
         return _classify(store, owner, key, request_id, FAILED, "preflight", _detail(exc))
     envelope = {"kind": "coordinator-judgment-request", "format": 1, "schema": name, "judgment_key": key,
                 "request_id": request_id, "brief": brief, "inputs": sorted(request["copies"])}
+    read = role.get("mode") == "read"   # Copilot reviewer design revision 6
+    if read:
+        envelope |= {"return_schema": SCHEMAS[name], "read_rules": READ_RULES.format(cwd=scratch / "cwd")}
     _seal(base, key, "launching", {"kind": "judgment-launching", "format": 1, "key": key, "request_id": request_id,
                                    "scratch": str(scratch), "at": _now()})
     try:
         result = clients.run_isolated(role["client"], repo, scratch, scratch / "cwd", receipts, envelope,
                                       SCHEMAS[name], role["model"], role["timeout"], role.get("max_turns"),   # D25
-                                      role.get("boundary"))   # launch-boundary L1
+                                      role.get("boundary"),   # launch-boundary L1
+                                      mode=role.get("mode"), required_reads=READ_REQUIRED if read else ())
     except (DomainError, OSError) as exc:
         if os.path.lexists(receipts):
             return _classify(store, owner, key, request_id, UNKNOWN, "refused-after-receipts", _detail(exc))

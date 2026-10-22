@@ -16,7 +16,7 @@ This page takes you from nothing to a finished epic on the bundled example, then
 | --- | --- | --- | --- |
 | Claude Code (`claude-code`) | `claude -p` | worker, spec author, reviewer, judgment | `max_turns` per role is its own turn limit (one turn is one model response, however many tool calls it holds). Live with 2.1.289 to 2.1.303. |
 | Codex CLI (`codex-cli`) | `codex exec` | worker, spec author, reviewer, judgment | Runs in its `workspace-write` sandbox; network only with `web: true` on the worker role. Live with 0.160 to 0.163. |
-| GitHub Copilot CLI (`copilot`) | `copilot -p` | worker and spec author only | Needs a `model` the account can use and a logged-in `copilot` or `COPILOT_GITHUB_TOKEN`. Its work is reviewed by Claude or Codex. Live with 1.0.91. |
+| GitHub Copilot CLI (`copilot`) | `copilot -p` | worker, spec author, and judgment in read mode | Needs a `model` the account can use and a logged-in `copilot` or `COPILOT_GITHUB_TOKEN`. Its work is reviewed by Claude or Codex. As judge it runs only inside the [launch boundary](#run-the-workers-in-a-sandbox) with `"mode": "read"`. Live with 1.0.91. |
 
 `doctor --client NAME` resolves the binary and runs `--version`, nothing more: it tells you the client is there, not that it is logged in. Run one prompt by hand (`claude -p 'reply with ok'`, `codex exec 'reply with ok'`) before the first drive.
 
@@ -131,7 +131,7 @@ Everything the quickstart made is under `$WORK`; `rm -rf "$WORK"` removes it all
           "judgment": {"client": "codex-cli", "model": "gpt-6-astra", "timeout": 600}}
 ```
 
-Copilot cannot review or judge (it has no write-free read-only mode), so those roles go to Claude or Codex.
+Copilot cannot review yet, so that role goes to Claude or Codex. It can judge in its read mode, inside the launch boundary: `{"client": "copilot", "model": "claude-sonnet-5", "timeout": 600, "mode": "read", "boundary": "bwrap"}`. It gets only `view`, `grep` and `glob`, reads the question, the mandate and the decisions in full, and answers in its final message.
 
 ## Your own repository
 

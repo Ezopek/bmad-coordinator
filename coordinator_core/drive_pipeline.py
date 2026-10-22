@@ -91,7 +91,19 @@ def _integer(value, low: int, high: int, what: str) -> None:
 
 
 def _role(name: str, value) -> None:
-    _keys(value, ("client", "model", "timeout"), ("web", "max_turns", "boundary"), f"Role {name}")
+    _keys(value, ("client", "model", "timeout"), ("web", "max_turns", "boundary", "mode"), f"Role {name}")
+    if "mode" in value:   # Copilot reviewer design revision 6, V1: the read mode, under the boundary only
+        if value["mode"] != "read":
+            raise _invalid(f"Role {name} mode must be read")
+        if name == "reviewer":
+            raise _unsupported("The read mode for the reviewer role is not implemented yet; give the reviewer role "
+                               "to claude-code or codex-cli")
+        if name != "judgment":
+            raise _invalid(f"Only the judgment role takes a mode, not {name}")
+        if not clients.get(value["client"]).read_mode:
+            raise _unsupported(f"Role {name} client {value['client']} has no read mode")
+        if value.get("boundary") != "bwrap":
+            raise _invalid(f"Role {name} mode read needs boundary bwrap")
     if "boundary" in value and boundary.check_kind(value["boundary"]) is None:   # launch-boundary L1
         raise _invalid(f"Role {name}: omit boundary instead of null")
     if type(value["client"]) is not str:
@@ -326,7 +338,8 @@ def validate(value) -> dict:
         raise _invalid(f"max_corrections must be an integer from 0 to {cap[0]} (the {cap[1]} pipeline cap)")
     if value["budgets"]["max_judgments"] > 0 and "judgment" not in roles:
         raise _invalid("max_judgments > 0 needs a judgment role")
-    if "judgment" in roles and not clients.get(roles["judgment"]["client"]).write_free_readonly:
+    if "judgment" in roles and roles["judgment"].get("mode") != "read" and \
+       not clients.get(roles["judgment"]["client"]).write_free_readonly:
         raise _unsupported("The judgment client has no write-free read-only mode (isolated runs are read-only)")
     if "project" in value:
         _project(value["project"])

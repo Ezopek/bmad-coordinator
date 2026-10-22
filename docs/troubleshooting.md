@@ -97,7 +97,7 @@ Two different limits are both called turns. `--max-turns` of `epic start` and `d
 
 ### Copilot
 
-`UNSUPPORTED_CLIENT_MODE` (exit 4) at bind: a `reviewer` or `judgment` role names `copilot`, which has no write-free read-only mode. Give those roles to `claude-code` or `codex-cli`. A Copilot role needs `model`; a model the account cannot use consumes the attempt as `unknown`.
+`UNSUPPORTED_CLIENT_MODE` or `UNSUPPORTED_STEP` (exit 4) at bind: a `reviewer` role names `copilot`, which cannot review yet, or a `judgment` role names it without `"mode": "read"` and `"boundary": "bwrap"`. A read-mode judgment on a Copilot CLI version not in the qualified list is refused before its key is reserved; `COORDINATOR_QUALIFY_READ=1` runs it as a qualification run, which is never observed. A read-mode judgment ends `unknown` when the model reads a path outside its staged files, skips one of the three files, or wraps its JSON answer in prose. The last also happens when it notices an injection in the question, which then goes to you. A Copilot role needs `model`; a model the account cannot use consumes the attempt as `unknown`.
 
 ## Reading the evidence
 
