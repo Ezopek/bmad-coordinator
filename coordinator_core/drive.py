@@ -398,7 +398,8 @@ class Launcher:
         spec = self.pipeline["roles"][role]
         client = clients.get(spec["client"])
         return worker.run_assignment(self.repo, self.store, self.owner, assignment_id, spec["model"],
-                                     spec["timeout"], client.name, spec.get("max_turns"))   # design D25
+                                     spec["timeout"], client.name, spec.get("max_turns"),   # design D25
+                                     spec.get("boundary"))   # launch-boundary L1
 
 
 @dataclass
@@ -667,7 +668,8 @@ class Run:
         if stopped is not None:
             return stopped
         if action["fresh"]:
-            try:
+            try:   # launch-boundary L7: the boundary checked before the key is reserved
+                clients.boundary_ready(role.get("boundary"), clients.get(role["client"]), self.repo)
                 judgment.prepare(self.repo, self.store, self.owner, self.feature_id, action["request_id"],
                                  self.lease["pipeline_sha256"], step.step_id, action["key"],
                                  self.lease["judgment_root"], hook=_hook)

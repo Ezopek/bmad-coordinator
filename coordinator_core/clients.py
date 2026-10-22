@@ -20,8 +20,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+from . import boundary
 from .model import DomainError
-from .repo import RepoIdentity
+from .repo import GIT_SAFE, RepoIdentity
 from .run_receipt import canonical, delta, inventory, private_file, read_binding, seal, stamp_json
 
 DEFAULT = "codex-cli"
@@ -96,6 +97,7 @@ class Client:
     script_launcher: bool = False                # a bound author runs its commands through the coordinator-written
                                                  # RUN/worker-tools/bmad-script (Copilot, design section 14)
     reports_cost: bool = False                   # bill design B5: the client reports a money figure (USD)
+    boundary_state: Callable[[str, dict], list] | None = None   # launch-boundary L3: runtime and state mounts
 
 
 @dataclass(frozen=True)
@@ -162,7 +164,128 @@ def _codex_argv(spec: LaunchSpec) -> list[str]:
             "--output-last-message", str(spec.run_dir / "last.json"), "-m", spec.model]
 
 
+CLAUDE_NAME, CODEX_NAME = "claude-code", "codex-cli"   # the registry names, known before the entries exist
+
+
+# Launch-boundary design L3: what each client needs inside the sandbox, its runtime and its own state, mounted at
+# the host paths. A path that does not exist is set aside as absent (boundary.ordered).
+def _home_of(env: dict) -> Path:
+    return Path(os.path.normpath(os.path.abspath(env.get("HOME") or os.path.expanduser("~"))))
+
+
+def _norm(path) -> str:
+    return os.path.normpath(os.path.abspath(os.path.expanduser(str(path))))
+
+
+def _node_runtime(binary: str, env: dict) -> list:
+    """A Node script client: its own chain, its Node installation read-only, and `node` as PATH finds it."""
+    mounts = boundary.executable(binary)
+    prefix = boundary.node_prefix(Path(os.path.realpath(binary)))
+    if prefix is not None:
+        mounts.append(boundary.Mount("ro", str(prefix)))
+    node = shutil.which("node", path=env.get("PATH", os.defpath))
+    return mounts + (boundary.executable(node) if node else [])
+
+
+# What a client reads at the start of a later session and could therefore carry a sandboxed run's command out of
+# the boundary: settings and their hooks, status line commands, instructions and the files they import, plugins,
+# skills, agents, commands. Inside the read-write state directory these are bound read-only when they exist, and
+# one created during a run ends it `unknown` (persistent_state).
+CLAUDE_PERSISTENT = ("settings.json", "settings.local.json", "keybindings.json", "agents", "commands", "hooks",
+                     "plugins", "skills", "output-styles", "bin", "projects")   # projects: auto-memory, carried into
+CODEX_PERSISTENT = ("config.toml", "rules", "prompts", "skills", "hooks", "plugins", "packages")   # later sessions
+PERSISTENT_PREFIXES = {"codex-cli": ("memories",)}   # Codex's cross-session memories (memories_1.sqlite, ...)
+
+
+def _state_dir(client_name: str, env: dict) -> tuple[Path, tuple] | None:
+    if client_name == CLAUDE_NAME:
+        return Path(_norm(env.get("CLAUDE_CONFIG_DIR") or _home_of(env) / ".claude")), CLAUDE_PERSISTENT
+    if client_name == CODEX_NAME:
+        return Path(_norm(env.get("CODEX_HOME") or _home_of(env) / ".codex")), CODEX_PERSISTENT
+    return None
+
+
+def persistent_paths(client_name: str, env: dict) -> list[Path]:
+    """The persistent entries of a client's state directory: the named ones and every top-level instruction file
+    (`*.md`) or executable file, existing or not."""
+    found = _state_dir(client_name, env)
+    if found is None:
+        return []
+    directory, names = found
+    paths = [directory / name for name in names]
+    prefixes = PERSISTENT_PREFIXES.get(client_name, ())
+    try:
+        paths += sorted(item for item in directory.iterdir() if item.suffix == ".md" or
+                        (prefixes and item.name.startswith(prefixes)) or
+                        (item.is_file() and not item.is_symlink() and os.access(item, os.X_OK)))
+    except OSError:
+        pass
+    return sorted(set(paths))
+
+
+def persistent_state(client_name: str, env: dict) -> dict[str, str]:
+    """Taken before a boundary launch and compared after it: a change or creation ends the run `unknown`."""
+    return {str(path): _entry_state(path) for path in persistent_paths(client_name, env)}
+
+
+def persistent_changes(client_name: str, env: dict, before: dict, quarantine: Path) -> tuple[list, list]:
+    """The persistent entries that changed during a boundary launch, and the ones it created, moved into
+    `quarantine` so the operator's next session never reads them (the move is reversible and recorded).
+
+    `quarantine` lies where the sandboxed run could not write (the coordinator's own directory, hidden inside the
+    sandbox; for an isolated run beside its receipt directory, outside every mount), it is created exclusively and
+    checked not to be a symlink, and an entry is moved by one rename, never copied: a link moves as a link."""
+    after = persistent_state(client_name, env)
+    changed = sorted(key for key in set(before) | set(after) if before.get(key) != after.get(key) or
+                     "unreadable" in (before.get(key), after.get(key)))
+    created = [key for key in changed if before.get(key, "absent") == "absent" and os.path.lexists(key)]
+    moved = []
+    if not created:
+        return changed, moved
+    quarantine = Path(quarantine)
+    try:
+        quarantine.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.mkdir(quarantine, 0o700)
+        if not stat.S_ISDIR(os.lstat(quarantine).st_mode) or os.path.realpath(quarantine) != str(quarantine):
+            raise OSError("quarantine is not a plain directory")
+    except OSError as exc:
+        return changed, [{"path": key, "to": None, "error": f"not moved: {exc}"} for key in created]
+    for index, key in enumerate(created):
+        target = quarantine / f"{index:02d}-{Path(key).name}"
+        try:
+            os.rename(key, target)
+            moved.append({"path": key, "to": str(target)})
+        except OSError as exc:
+            moved.append({"path": key, "to": None, "error": f"not moved: {exc}"})
+    return changed, moved
+
+
+def _locked_state(client_name: str, env: dict) -> list:
+    directory, _ = _state_dir(client_name, env)
+    return [boundary.Mount("rw", str(directory)),
+            *[boundary.Mount("ro", str(path)) for path in persistent_paths(client_name, env)]]
+
+
+def _codex_state(binary: str, env: dict) -> list:
+    return _node_runtime(binary, env) + _locked_state(CODEX_NAME, env)
+
+
+def _claude_state(binary: str, env: dict) -> list:
+    """The native executable; ~/.claude read-write but for its persistent entries; ~/.claude.json a private 0600
+    copy, never written back."""
+    mounts = boundary.executable(binary) + _locked_state(CLAUDE_NAME, env)
+    return mounts if env.get("CLAUDE_CONFIG_DIR") else \
+        mounts + [boundary.Mount("copy", str(_home_of(env) / ".claude.json"))]
+
+
+def _copilot_state(binary: str, env: dict) -> list:
+    """The Node runtime and the CLI's runtime package, read-only; COPILOT_HOME is the run's own (run_env)."""
+    return _node_runtime(binary, env) + [boundary.Mount("ro", _norm(Path(env.get("XDG_CACHE_HOME") or
+                                                                          _home_of(env) / ".cache") / "copilot"))]
+
+
 CODEX = Client(
+    boundary_state=_codex_state,
     name="codex-cli", executable="codex", confinement="os-sandbox-requested", presets_session=False,
     return_source="client-file", envelope_via="stdin", max_envelope_bytes=None, write_free_readonly=True,
     max_turns_default=None, env={}, env_unset=frozenset(), run_subdirs=(), private_subdirs=(),
@@ -531,6 +654,7 @@ def _claude_terminal(run_dir: Path, launch: dict) -> Terminal:
 CLAUDE_REQUESTED = {"read-only": frozenset(REVIEW_TOOLS.split(",")),
                     "workspace-write": frozenset(AUTHOR_TOOLS.split(","))}
 CLAUDE = Client(
+    boundary_state=_claude_state,
     name="claude-code", executable="claude", confinement="tool-policy", presets_session=True, reports_cost=True,
     return_source="stdout", envelope_via="stdin", max_envelope_bytes=None, write_free_readonly=True,
     max_turns_default=60, env={"DISABLE_AUTOUPDATER": "1", "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
@@ -904,6 +1028,7 @@ def _copilot_terminal(run_dir: Path, launch: dict) -> Terminal:
 
 
 COPILOT = Client(
+    boundary_state=_copilot_state,
     name="copilot", executable="copilot", confinement="approval-policy-advisory", presets_session=True,
     return_source="worker-file", envelope_via="argv", max_envelope_bytes=100_000, write_free_readonly=False,
     max_turns_default=None, env={"COPILOT_AUTO_UPDATE": "false"},
@@ -1000,6 +1125,142 @@ def preflight(client: Client) -> tuple[str, str]:
     if result.returncode != 0 or not version:
         raise DomainError("BLOCKED_EVIDENCE", f"Worker client {client.name} version probe failed")
     return binary, version
+
+
+def _author_extras(env: dict) -> list:
+    """Launch-boundary L3: what a bound planning author's script forms need: uv with its chain, its managed
+    Pythons and the coordinator's interpreter with its prefixes outside /usr. uv's cache is private to the run
+    (UV_CACHE), never the operator's, so a run cannot poison what uv later runs outside the boundary."""
+    home = _home_of(env)
+    mounts = []
+    uv = shutil.which("uv", path=env.get("PATH", os.defpath))
+    if uv:
+        mounts += boundary.executable(uv)
+    data = Path(env.get("XDG_DATA_HOME") or home / ".local" / "share") / "uv"   # managed Pythons, read-only
+    mounts += [boundary.Mount("ro", _norm(data)), *boundary.executable(sys.executable)]   # no shared cache: UV_CACHE
+    for prefix in sorted({sys.prefix, sys.base_prefix, sys.exec_prefix}):
+        if not Path(prefix).is_relative_to("/usr"):
+            mounts.append(boundary.Mount("ro", _norm(prefix)))
+    return mounts
+
+
+def boundary_env(client: Client, env: dict) -> tuple[dict, dict]:
+    """Launch-boundary L2/L3: the variables a boundary adds to the spawn (names recorded, never values) and the
+    receipt's extra facts. A Copilot launch without a documented token variable gets `gh`'s token for github.com
+    in COPILOT_GITHUB_TOKEN; without one the launch is refused."""
+    added, extra = dict(boundary.ENV), {}
+    if client.name == COPILOT.name and not any(env.get(name) for name in COPILOT_TOKENS):
+        gh = shutil.which("gh", path=env.get("PATH", os.defpath))
+        token = ""
+        if gh:
+            try:
+                done = subprocess.run([gh, "auth", "token", "--hostname", "github.com"], capture_output=True,
+                                      text=True, timeout=10, env=env, stdin=subprocess.DEVNULL)
+                token = done.stdout.strip() if done.returncode == 0 else ""
+            except (OSError, subprocess.SubprocessError):
+                token = ""
+        if not token:
+            raise boundary.unusable("no Copilot token: set COPILOT_GITHUB_TOKEN, or log in with gh")
+        added["COPILOT_GITHUB_TOKEN"] = token
+        extra = {"token_source": "gh", "token_host": "github.com"}
+    return added, extra
+
+
+UV_CACHE = "/tmp/coordinator-uv-cache"   # inside the sandbox's own /tmp
+BOUNDARY_ENV = frozenset({"PATH", "HOME", "USER", "LOGNAME", "LANG", "LANGUAGE", "TERM", "TZ", "SHELL",
+                          "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS",
+                          "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY", "http_proxy", "https_proxy",
+                          "no_proxy", "all_proxy", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME"})
+BOUNDARY_PREFIXES = {CLAUDE_NAME: ("CLAUDE", "ANTHROPIC"), CODEX_NAME: ("OPENAI", "CODEX"),
+                     "copilot": ("COPILOT", "GH_", "GITHUB")}
+
+
+def boundary_passed(client: Client, env: dict) -> tuple[dict, list[str]]:
+    """Launch-boundary L2: a boundary run gets only the base variables, `LC_*`, its own client's names and its
+    static env, plus the prefixes COORDINATOR_BOUNDARY_PASS lists (comma-separated); another client's secrets,
+    a D-Bus address or an agent socket stay outside. Returns the kept env and the dropped names (recorded)."""
+    extra = tuple(item for item in os.environ.get("COORDINATOR_BOUNDARY_PASS", "").split(",") if item)
+    prefixes = ("LC_", *BOUNDARY_PREFIXES.get(client.name, ()), *extra)
+    kept = {key: value for key, value in env.items()
+            if key in BOUNDARY_ENV or key in client.env or key.startswith(prefixes)}
+    return kept, sorted(set(env) - set(kept))
+
+
+@dataclass(frozen=True)
+class BoundaryPlan:
+    bwrap: str
+    version: str
+    mounts: tuple   # unordered; ordered again at the spawn, when the run directory exists
+    env: dict       # added to the spawn environment; names recorded, values never
+    extra: dict     # receipt facts (Copilot's token source and host, the dropped variable names)
+    kept: tuple     # the inherited variable names the allowlist keeps (boundary_passed)
+
+
+def worktree_protected(repo: RepoIdentity) -> list[Path]:
+    """Launch-boundary L2: what no client-state, runtime or project mount may reach: the common directory, the
+    coordinator's directory, the worktree's Git entry and every other worktree."""
+    others = [Path(line[len("worktree "):]) for line in _git_lines(repo.worktree, "worktree", "list", "--porcelain")
+              if line.startswith("worktree ")]
+    return [repo.common_dir, repo.common_dir / "coordinator", repo.worktree / ".git",
+            *[path for path in others if path.resolve() != repo.worktree.resolve()]]
+
+
+def plan_boundary(kind: str | None, client: Client, binary: str, launch_mounts: list, protected,
+                  commands=(), extra_mounts=()) -> BoundaryPlan | None:
+    """Launch-boundary L7, before any reservation: bwrap and a no-op sandbox, the mount set validated, the Copilot
+    token obtained, the client's --version (and a bound author's uv --version) inside the full mount set."""
+    if boundary.check_kind(kind) is None:
+        return None
+    env, dropped = boundary_passed(client, static_env(client))
+    bwrap, version = boundary.preflight(env)
+    own = list((client.boundary_state or (lambda path, _: boundary.executable(path)))(binary, env))
+    own += boundary.interpreter(binary, env.get("PATH", os.defpath))   # a script client's interpreter
+    own += _author_extras(env) if commands else []
+    boundary.check_outside([*own, *extra_mounts], protected)
+    added, extra = boundary_env(client, env)
+    if commands:
+        added["UV_CACHE_DIR"] = UV_CACHE
+    extra = {**extra, "env_dropped": dropped}
+    mounts = (*boundary.system_mounts(), boundary.Mount("tmpfs", str(_home_of(env))), *own, *extra_mounts,
+              *launch_mounts)
+    ordered, _ = boundary.ordered(list(mounts))
+    probe_env = {**env, **added}
+    boundary.probe(bwrap, ordered, Path("/"), [binary, "--version"], probe_env, f"{client.name} --version")
+    if commands:
+        uv = shutil.which("uv", path=env.get("PATH", os.defpath))
+        if not uv:
+            raise boundary.unusable("uv is not on PATH for the bound author")
+        boundary.probe(bwrap, ordered, Path("/"), [uv, "--version"], probe_env, "uv --version")
+    return BoundaryPlan(bwrap, version, mounts, added, extra, tuple(sorted(env)))
+
+
+def boundary_ready(kind: str | None, client: Client, repo: RepoIdentity) -> None:
+    """Launch-boundary L7 for a launch whose run directory does not exist yet (a judgment, before its key is
+    reserved): the client's preflight and the boundary's checks with the client's own mounts."""
+    if boundary.check_kind(kind) is None:
+        return
+    binary, _ = preflight(client)
+    plan_boundary(kind, client, binary, [], worktree_protected(repo))
+
+
+def boundary_spawn_env(plan: BoundaryPlan, base: dict) -> dict:
+    """The spawn environment's inherited part under a boundary: only the names the plan kept."""
+    return {key: value for key, value in base.items() if key in plan.kept}
+
+
+def boundary_launch(plan: BoundaryPlan, cwd: Path, argv: list[str], spawned: list[str]) -> tuple[list, dict, dict]:
+    """At the spawn: the wrapped spawn argv, the receipt's `boundary` record (the client argv unexpanded) and the
+    copy descriptors, which the caller passes with pass_fds and closes with boundary.close right after the spawn."""
+    mounts, absent = boundary.ordered(list(plan.mounts))
+    copies = boundary.open_copies(mounts)
+    try:
+        wrapped = boundary.wrap(plan.bwrap, mounts, cwd, spawned, copies)
+        record = boundary.record(plan.bwrap, plan.version, mounts, absent, plan.env,
+                                 boundary.wrap(plan.bwrap, mounts, cwd, argv, copies), **plan.extra)
+    except BaseException:
+        boundary.close(copies)
+        raise
+    return wrapped, record, copies
 
 
 def doctor_notes(client: Client) -> dict:
@@ -1340,14 +1601,111 @@ def verify_sealed(repo: RepoIdentity, baseline: dict[str, str]) -> tuple[list[st
     return modified, deleted
 
 
-def integrity_record(repo: RepoIdentity, baseline: dict[str, str], group: dict) -> dict:
+# F24 (launch-boundary design L0): the Git metadata that can make the coordinator's later Git calls run a command
+# (config: filter drivers, textconv and the like; config.worktree; hooks) or hide a file from the inventory (exclude,
+# sparse-checkout), and the files that redirect a worktree (commondir, gitdir, the `.git` pointer).
+GIT_METADATA = ("config", "config.worktree", "commondir", "gitdir", "info/attributes", "info/exclude",
+                "info/sparse-checkout")
+
+
+def _entry_state(path: Path) -> str:
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return "absent"
+    except OSError:
+        return "unreadable"
+    if stat.S_ISLNK(info.st_mode):   # the link and what it finally points to, so a write through it shows
+        real = Path(os.path.realpath(path))
+        target = "loop" if real.is_symlink() else _entry_state(real)
+        return f"symlink:{os.readlink(path)}|{target}"
+    if stat.S_ISDIR(info.st_mode):
+        return "dir"
+    return (_digest(path) or "unreadable") if stat.S_ISREG(info.st_mode) else "other"
+
+
+def _global_git_files() -> list[Path]:
+    """The operator-level Git files a worker outside the boundary could write (the system file is root's)."""
+    if os.environ.get("GIT_CONFIG_GLOBAL"):
+        files = [Path(os.environ["GIT_CONFIG_GLOBAL"])]
+    else:
+        files = [Path(os.path.expanduser("~/.gitconfig"))]
+    xdg = Path(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")) / "git"
+    return files + [xdg / name for name in ("config", "attributes", "ignore")]
+
+
+CONFIG_PATH_KEYS = ("core.attributesfile", "core.excludesfile", "core.hookspath")
+
+
+def _config_sources(repo: RepoIdentity) -> list[Path]:
+    """Every file Git reads configuration from for this worktree (included files too), as Git itself reports
+    them, and the files and directories those settings name (attributes, excludes, a hooks path)."""
+    done = subprocess.run(["git", *GIT_SAFE, "-C", str(repo.worktree), "config", "--list", "--show-origin", "-z"],
+                          capture_output=True, stdin=subprocess.DEVNULL)
+    if done.returncode != 0:
+        raise ValueError("git config failed")
+    fields = os.fsdecode(done.stdout).split("\0")   # origin NUL key LF value NUL ...: a value cannot fake an origin
+    found = []
+    for origin, entry in zip(fields[0::2], fields[1::2]):
+        if not origin.startswith("file:"):
+            continue
+        source = origin[len("file:"):]
+        found.append(Path(source) if os.path.isabs(source) else repo.worktree / source)
+        key, _, value = entry.partition("\n")
+        if key in CONFIG_PATH_KEYS and value:
+            named = Path(os.path.expanduser(value))
+            found.append(named if named.is_absolute() else repo.worktree / named)
+    return found
+
+
+def git_metadata(repo: RepoIdentity) -> dict[str, str]:
+    """F24: the state of every GIT_METADATA file and hook of the common directory and of the worktree's own Git
+    directory (a symlinked hooks directory is read through its real path), the worktree's `.git` entry, the
+    operator-level Git files and every file Git reports reading configuration from (includes too) with the paths
+    those name; taken before a run and compared after the drain, before the coordinator's first Git
+    call, additions included. An unreadable entry never compares equal (integrity_record)."""
+    gitdir = Path(_git_lines(repo.worktree, "rev-parse", "--absolute-git-dir")[0])
+    found = {str(repo.worktree / ".git"): _entry_state(repo.worktree / ".git")}
+    for path in [*_global_git_files(), *_config_sources(repo)]:
+        found[str(path)] = _entry_state(path)
+        real = Path(os.path.realpath(path))
+        if real.is_dir():   # a hooks path
+            for item in _walk(real):
+                found[str(item)] = _entry_state(item)
+    for base in dict.fromkeys((repo.common_dir, gitdir)):
+        for name in GIT_METADATA:
+            found[str(base / name)] = _entry_state(base / name)
+        hooks = base / "hooks"
+        found[str(hooks)] = _entry_state(hooks)
+        real = Path(os.path.realpath(hooks))
+        if real.is_dir():
+            for path in _walk(real):
+                found[str(path)] = _entry_state(path)
+    return found
+
+
+def integrity_record(repo: RepoIdentity, baseline: dict[str, str], group: dict,
+                     git_before: dict[str, str] | None = None, state_before: tuple | None = None) -> dict:
     modified, deleted = verify_sealed(repo, baseline)
-    return {"checked": len(baseline), "modified": modified, "deleted": deleted, **group}
+    record = {"checked": len(baseline), "modified": modified, "deleted": deleted, **group}
+    if state_before is not None:   # launch-boundary L3: (client name, env, the snapshot, the run directory)
+        changed, moved = persistent_changes(*state_before)
+        record["client_state_changed"], record["client_state_quarantined"] = changed, moved
+    if git_before is not None:   # F24: absent in records sealed before it, which stay clean
+        try:
+            after = git_metadata(repo)
+        except (OSError, ValueError, IndexError):
+            after = {"<git metadata>": "unreadable"}
+        record["git_metadata_changed"] = sorted(key for key in set(git_before) | set(after)
+                                                if git_before.get(key) != after.get(key) or
+                                                "unreadable" in (git_before.get(key), after.get(key)))
+    return record
 
 
 def integrity_clean(record: object) -> bool:
     return isinstance(record, dict) and record.get("modified") == [] and record.get("deleted") == [] and \
-        record.get("group_terminated") is True
+        record.get("group_terminated") is True and record.get("git_metadata_changed", []) == [] and \
+        record.get("client_state_changed", []) == []
 
 
 def _now() -> str:
@@ -1355,7 +1713,7 @@ def _now() -> str:
 
 
 def _git_lines(path: Path, *args: str) -> list[str]:
-    result = subprocess.run(["git", "-C", str(path), *args], capture_output=True, text=True)
+    result = subprocess.run(["git", *GIT_SAFE, "-C", str(path), *args], capture_output=True, text=True)
     if result.returncode != 0:
         raise ValueError("git failed")
     return result.stdout.splitlines()
@@ -1408,7 +1766,8 @@ def _schema_keys(final: object, schema: dict) -> dict:
 
 
 def run_isolated(client: str, target: RepoIdentity, root: Path, cwd: Path, receipt_dir: Path, envelope: dict,
-                 schema: dict, model: str, timeout_seconds: int, max_turns: int | None = None) -> IsolatedRun:
+                 schema: dict, model: str, timeout_seconds: int, max_turns: int | None = None,
+                 boundary_kind: str | None = None) -> IsolatedRun:
     """D17: one read-only process outside any project; no assignment, fence or DB anchor. Receipts stay in
     receipt_dir; the caller copies and anchors them. `observed` means well-formed sealed transport only."""
     chosen = get(client)
@@ -1425,6 +1784,10 @@ def run_isolated(client: str, target: RepoIdentity, root: Path, cwd: Path, recei
     if chosen.max_envelope_bytes is not None and len(data) > chosen.max_envelope_bytes:
         raise DomainError("INVALID_INPUT", "Envelope exceeds the client's envelope limit")
     binary, version = preflight(chosen)
+    plan = plan_boundary(boundary_kind, chosen, binary, boundary.project_mounts("isolated", receipt_dir, Path(cwd)),
+                         [target.common_dir, *[Path(line[len("worktree "):]) for line in
+                                               _git_lines(target.worktree, "worktree", "list", "--porcelain")
+                                               if line.startswith("worktree ")]])   # launch-boundary L4, L7
     try:
         receipt_dir.mkdir(mode=0o700)
     except FileExistsError as exc:
@@ -1457,9 +1820,16 @@ def run_isolated(client: str, target: RepoIdentity, root: Path, cwd: Path, recei
     with os.fdopen(out_fd, "wb") as output, os.fdopen(err_fd, "wb") as error:
         process = None
         try:
-            process = subprocess.Popen(spawn_argv(chosen, argv, data), cwd=cwd, stdin=subprocess.PIPE,
-                                       stdout=output, stderr=error, start_new_session=True, umask=0o077,
-                                       env={**static_env(chosen), **run_env})
+            state_before = persistent_state(chosen.name, static_env(chosen)) if plan else None
+            spawned, record, copies = boundary_launch(plan, cwd, argv, spawn_argv(chosen, argv, data)) if plan \
+                else (spawn_argv(chosen, argv, data), None, {})
+            try:
+                process = subprocess.Popen(spawned, cwd=cwd, stdin=subprocess.PIPE, stdout=output, stderr=error,
+                                           start_new_session=True, umask=0o077, pass_fds=tuple(copies.values()),
+                                           env={**(boundary_spawn_env(plan, static_env(chosen)) if plan else
+                                                   static_env(chosen)), **run_env, **(plan.env if plan else {})})
+            finally:
+                boundary.close(copies)
             own_group(process)
             seal(receipt_dir / "launch-intent.json", launch_intent(process.pid, receipt_dir, session))
             launch = {"kind": "isolated-launch", "client": chosen.name, "binary": binary, "argv": argv,
@@ -1472,6 +1842,8 @@ def run_isolated(client: str, target: RepoIdentity, root: Path, cwd: Path, recei
                 launch["session_id"] = session
             if spec.max_turns is not None:
                 launch["max_turns"] = spec.max_turns
+            if record is not None:   # launch-boundary L5, inside the launch digest
+                launch["boundary"] = record
             launch_digest = seal(receipt_dir / "launch.json", launch)
             if scrub is not None:
                 seal(receipt_dir / "env-scrub.json", scrub)
@@ -1502,6 +1874,10 @@ def run_isolated(client: str, target: RepoIdentity, root: Path, cwd: Path, recei
         return unknown("timeout; the process group was signalled")
     if not group["group_terminated"]:
         return unknown("process group survived termination")
+    if state_before is not None and persistent_changes(chosen.name, static_env(chosen), state_before,
+                                                       receipt_dir.parent / f"{receipt_dir.name}.quarantine")[0]:
+        return unknown("the run changed or created a persistent entry of the client's state; a created one was "
+                       "moved to quarantine (launch-boundary L3)")
     try:
         if process.returncode != 0:   # design D25: the stream is read first, so a stop is named by its cause
             exited_terminal(chosen, receipt_dir, launch)

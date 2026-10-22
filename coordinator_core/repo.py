@@ -4,6 +4,12 @@ from pathlib import Path
 
 from .model import DomainError
 
+# F24 (launch-boundary design L0): every Git call the coordinator makes in a worktree turns off the two commands a
+# repository's own config can make Git run on reads, writes and merges: core.fsmonitor (run by ls-files and status)
+# and the hooks (worktree add, merge, checkout). A worker that could write .git/config or .git/hooks never gets
+# the coordinator to run its command after the run.
+GIT_SAFE = ("-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null")
+
 
 @dataclass(frozen=True)
 class RepoIdentity:
@@ -14,7 +20,7 @@ class RepoIdentity:
 def resolve_repo(start: Path) -> RepoIdentity:
     try:
         result = subprocess.run(
-            ["git", "-C", str(start), "rev-parse", "--path-format=absolute", "--git-common-dir", "--show-toplevel"],
+            ["git", *GIT_SAFE, "-C", str(start), "rev-parse", "--path-format=absolute", "--git-common-dir", "--show-toplevel"],
             check=True, capture_output=True, text=True,
         )
         common, worktree = result.stdout.splitlines()

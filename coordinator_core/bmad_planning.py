@@ -12,7 +12,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from . import bmad_contract as contract
-from . import bundles, clients
+from . import boundary, bundles, clients
 from .model import AssignmentInput, DomainError
 from .profiles import ReturnProfile
 from .repo import resolve_repo
@@ -53,6 +53,7 @@ class PlanningPrepare:
     prd_acceptance: str | None = None            # architecture only: an accepted PRD feeds it
     client_root: str = ".agents/skills"
     client: str = clients.DEFAULT                # registered worker client; recorded in the binding when not default
+    boundary: str | None = None                  # launch-boundary L1; recorded in the binding when set
 
 
 CODEX_LABEL = "Codex does not auto-discover the skill: read the files named here."
@@ -76,15 +77,17 @@ def spec_digest(spec) -> str:
     data = asdict(spec)
     if data.get("client") == clients.DEFAULT:
         del data["client"]
-    for key, unset in (("corrects_review", None), ("finding_ids", [])):
+    for key, unset in (("corrects_review", None), ("finding_ids", []), ("boundary", None)):
         if key in data and data[key] == unset:
             del data[key]
     return hashlib.sha256(canonical(data)).hexdigest()
 
 
 def client_binding(spec) -> dict:
-    """The binding carries the client only when it is not the default, so Codex bindings keep their bytes."""
-    return {} if spec.client == clients.DEFAULT else {"client": spec.client}
+    """The binding carries the client only when it is not the default, so Codex bindings keep their bytes, and the
+    boundary only when set (launch-boundary L1)."""
+    kind = boundary.check_kind(getattr(spec, "boundary", None))
+    return ({} if spec.client == clients.DEFAULT else {"client": spec.client}) | ({"boundary": kind} if kind else {})
 
 
 RULED_CLIENTS = (clients.CLAUDE.name, clients.COPILOT.name)  # clients whose author argv renders exact command rules
@@ -884,9 +887,10 @@ def view_return(repo, store, assignment_id: str) -> dict:
 
 
 def run(repo, store, owner, assignment_id: str, model: str, timeout_seconds: int, client: str | None = None,
-        max_turns: int | None = None) -> dict:
+        max_turns: int | None = None, boundary_kind: str | None = None) -> dict:
     """Thin wrapper over worker.run_assignment; every mandatory gate lives in the core reserve path."""
-    report = run_assignment(repo, store, owner, assignment_id, model, timeout_seconds, client, max_turns)
+    report = run_assignment(repo, store, owner, assignment_id, model, timeout_seconds, client, max_turns,
+                            boundary_kind)
     planning = binding_anchor(store.read_snapshot()["events"], assignment_id)[0] == PLAN  # review runs have no verdict
     return {"assignment_id": report.assignment_id, "state": report.state, "run_dir": report.run_dir,
             "evidence_needs": report.evidence_needs,

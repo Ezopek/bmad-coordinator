@@ -313,7 +313,8 @@ class ClientTests(Harness):
         plain, alt = self.binding_of(default["assignment_id"]), self.binding_of(other["assignment_id"])
         self.assertNotIn("client", plain)
         self.assertEqual("alt-stdout", alt["client"])
-        unset = ("corrects_review", "finding_ids")  # an unset correction stays out of the digest (correction round)
+        unset = ("corrects_review", "finding_ids",  # an unset correction stays out of the digest (correction round)
+                 "boundary")   # and so does an unset launch boundary (launch-boundary L1)
         legacy = {key: value for key, value in asdict(spec("p-default", "one")).items()
                   if key not in ("client", *unset)}
         self.assertEqual(sha(canonical(legacy)), plain["spec_sha256"])
@@ -327,7 +328,8 @@ class ClientTests(Harness):
         self.assertNotIn("Codex", self.brief_of(other))
         self.assertIn("The alt-stdout client does not auto-discover the skill", self.brief_of(other))
         reviewed = review.ReviewPrepare("bundle", "reviewer", "r1", self.compat)
-        self.assertEqual(sha(canonical({key: value for key, value in asdict(reviewed).items() if key != "client"})),
+        self.assertEqual(sha(canonical({key: value for key, value in asdict(reviewed).items()
+                                        if key not in ("client", "boundary")})),
                          planning.spec_digest(reviewed))
         self.assertNotEqual(planning.spec_digest(reviewed), planning.spec_digest(replace(reviewed, client="alt-stdout")))
 
@@ -461,7 +463,8 @@ class ClientTests(Harness):
         self.assertGreater(during["checked"], record["checked"])  # includes the running attempt's sealed files
 
     def test_integrity_record_written_on_clean_timeout_and_interrupt_paths(self):
-        keys = {"checked", "modified", "deleted", "group_alive_after_exit", "group_signals", "group_terminated"}
+        keys = {"checked", "modified", "deleted", "group_alive_after_exit", "group_signals", "group_terminated",
+                "git_metadata_changed"}   # F24
         _, report = self.completed()
         self.assertEqual(keys, set(self.receipt(report, "integrity.json")))
         self.assertTrue(clients.integrity_clean(self.receipt(report, "integrity.json")))
@@ -817,7 +820,7 @@ class ClientTests(Harness):
                           "max_envelope_bytes", "write_free_readonly", "max_turns_default", "env", "env_unset",
                           "run_subdirs", "private_subdirs", "observation_name", "internal_tools", "run_env",
                           "allowed_tools", "argv", "launch_facts", "observe", "terminal", "env_keep", "session_scrub",
-                          "script_launcher", "reports_cost"],
+                          "script_launcher", "reports_cost", "boundary_state"],
                          [item.name for item in fields(clients.Client)])
         self.assertEqual(["binary", "mode", "worktree", "run_dir", "schema", "model", "max_turns", "session_id",
                           "read_dirs", "commands", "isolated", "return_path", "web"],

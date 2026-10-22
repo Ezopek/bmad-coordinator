@@ -9,7 +9,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
-from . import backlog
+from . import backlog, boundary
 from . import bmad_contract as contract
 from . import bmad_implementation as implementation
 from . import bmad_planning, bmad_spec_author, bundles, clients, judgment
@@ -37,6 +37,7 @@ PLANNING_MAX_CORRECTIONS = 4   # a planning pipeline validates as before the imp
 MAX_TIMEOUT = 86400
 MAX_TURNS = 1000   # design D25: a role's turn limit
 MAX_COST_USD = 10000   # bill design B5: a story's or an epic's money bound, two decimals at most
+MAX_BOUNDARY_PATHS = 32   # launch-boundary L4: a project's own extra mounts
 COMMAND_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
 MAX_OUTPUT = 1 << 24
 COMPLETE = ("OBSERVED_COMPLETE_CLAIM", "OBSERVED_PARTIAL_CLAIM")
@@ -78,13 +79,21 @@ def _text(value, what: str) -> None:
         raise _invalid(f"{what} must be non-empty text")
 
 
+def _boundary(value: dict, role: str) -> dict:
+    """Launch-boundary L1: the role's boundary for a prepare spec, only when set (the spec digest stays)."""
+    kind = value["roles"].get(role, {}).get("boundary")
+    return {"boundary": kind} if kind else {}
+
+
 def _integer(value, low: int, high: int, what: str) -> None:
     if type(value) is not int or not low <= value <= high:
         raise _invalid(f"{what} must be an integer from {low} to {high}")
 
 
 def _role(name: str, value) -> None:
-    _keys(value, ("client", "model", "timeout"), ("web", "max_turns"), f"Role {name}")
+    _keys(value, ("client", "model", "timeout"), ("web", "max_turns", "boundary"), f"Role {name}")
+    if "boundary" in value and boundary.check_kind(value["boundary"]) is None:   # launch-boundary L1
+        raise _invalid(f"Role {name}: omit boundary instead of null")
     if type(value["client"]) is not str:
         raise _invalid(f"Role {name} client must be a registered client name")
     if value["client"] not in clients.REGISTRY:
@@ -200,7 +209,14 @@ def _project(value) -> None:
     without glob characters, so the status files' string-prefix checks (protected, prepare, sync_status) are sound.
     `context` (design D24) lists the relative files a spec author reads first."""
     _keys(value, ("setup", "verify", "env", "commit_identity", "output_limit_bytes"),
-          ("rules", "artifacts_dir", "briefs_dir", "context", "backlog"), "Pipeline project")
+          ("rules", "artifacts_dir", "briefs_dir", "context", "backlog", "boundary"), "Pipeline project")
+    if "boundary" in value:   # launch-boundary L4: what a bounded worker's own test runs need, beyond the defaults
+        _keys(value["boundary"], (), ("ro", "rw"), "Project boundary")
+        for mode, paths in value["boundary"].items():
+            if not isinstance(paths, list) or len(paths) > MAX_BOUNDARY_PATHS or any(
+                    type(item) is not str or not (item.startswith("/") or item.startswith("~/")) or
+                    os.path.normpath(item) != item or not clients.pattern_safe(item) for item in paths):
+                raise _invalid(f"Project boundary {mode} must list normalized absolute or ~/ paths without patterns")
     if "backlog" in value:   # backlog design A3: the layout, from the closed registry; absent means bmad
         _keys(value["backlog"], ("kind",), (), "Project backlog")
         backlog.get(value["backlog"]["kind"])
@@ -823,7 +839,8 @@ def _correction(step, sid, snapshot, facts, bound, head, key, compat_id, client,
                  if row["feature_id"] == feature_id and row["mandate_revision"] == revision and
                  row["request_id"] in asked]
     extra = {"prd_acceptance": origin["prd_acceptance"]} if origin.get("prd_acceptance") else {}
-    spec = _spec(step, feature_id, key, compat_id, client, intent="update", update_of=head["id"],
+    spec = _spec(step, feature_id, key, compat_id, client, **_boundary(value, "worker"), intent="update",
+                 update_of=head["id"],
                  corrects_review=review_id, finding_ids=blocking, inputs=sorted(roles), input_roles=dict(roles),
                  decisions=decisions, **extra)
     return StepState(sid, "author", "ready", None, {"kind": "prepare", "intent": "update", "spec": spec},
@@ -834,7 +851,8 @@ def _head_state(step, sid, snapshot, facts, bound, key, compat_id, client, value
                 sha, workspace, prd_acceptance=None) -> StepState:
     if not bound:
         extra = {"prd_acceptance": prd_acceptance} if prd_acceptance else {}
-        spec = _spec(step, feature_id, key, compat_id, client, intent="create", slug=step["slug"],
+        spec = _spec(step, feature_id, key, compat_id, client, **_boundary(value, "worker"), intent="create",
+                     slug=step["slug"],
                      inputs=list(step["inputs"]), input_roles=dict(step["inputs"]), **extra)
         return StepState(sid, "author", "ready", None, {"kind": "prepare", "intent": "create", "spec": spec}, subjects)
     head = bound[-1]
@@ -881,7 +899,8 @@ def _head_state(step, sid, snapshot, facts, bound, key, compat_id, client, value
                   not (facts["bindings"][row["id"]].get("continues") or {}).get("corrects_review"))
     if updates >= value["budgets"]["max_updates"]:
         return StepState(sid, "author", "needs-human", "update-budget", None, subjects)
-    spec = _spec(step, feature_id, key, compat_id, client, intent="update", update_of=head["id"],
+    spec = _spec(step, feature_id, key, compat_id, client, **_boundary(value, "worker"), intent="update",
+                 update_of=head["id"],
                  continues_request=request["id"])
     return StepState(sid, "author", "ready", None, {"kind": "prepare", "intent": "update", "spec": spec}, subjects)
 
@@ -939,7 +958,7 @@ def _review_state(step, sha, snapshot, facts, feature, compat_id, value, done) -
     half = sorted((row for row in live if row["id"] in facts["unbound"] and row["state"] == "prepared" and
                    _own(row["idempotency_key"], prefix)), key=lambda row: prepared[row["id"]])
     spec = {"bundle_id": bundle_id, "reviewer_id": step["reviewer_id"], "key": _next_key(sha, sid, rows),
-            "client": value["roles"]["reviewer"]["client"]}
+            "client": value["roles"]["reviewer"]["client"], **_boundary(value, "reviewer")}
     if compat_id is not None and not done[step["of"]].subjects.get("code"):   # design D22: planning only
         spec["compat_decision_id"] = compat_id
     if done[step["of"]].subjects.get("code"):   # ruling R9: the code lenses; design D24: a spec bundle's own
@@ -1211,6 +1230,7 @@ def _implement_head(step, sid, snapshot, facts, bound, key, value, subjects, fea
 
     def spec(**extra):   # an operator's revise decision joins the update's decisions (ruling P13)
         return {"feature_id": feature["id"], "key": key, "author_id": step["author_id"], "client": client,
+                **_boundary(value, "worker"),
                 "project": value["project"],
                 "decisions": decisions + ([{"id": extra["revises"]}] if "revises" in extra else []),
                 **({"web": True} if value["roles"]["worker"].get("web") is True else {}),

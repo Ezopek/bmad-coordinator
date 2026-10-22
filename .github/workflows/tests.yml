@@ -17,11 +17,22 @@ jobs:
           python-version: "3.11"
       - name: uv (the Copilot launcher tests need a real uv on PATH)
         run: python3 -m pip install --quiet uv
+      - name: bubblewrap (the launch boundary tests run under a real bwrap here, never skipped)
+        run: |
+          sudo apt-get install -y --no-install-recommends bubblewrap
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          bwrap --ro-bind /usr /usr --symlink usr/bin /bin --symlink usr/lib /lib --symlink usr/lib64 /lib64 \
+            --proc /proc --dev /dev /bin/true
       - name: Versions
         run: |
           python3 --version
           git --version
           uv --version
+          bwrap --version
           df -T "$GITHUB_WORKSPACE"
       - name: Suite
+        env:
+          COORDINATOR_REQUIRE_BWRAP: "1"
         run: PYTHONPATH=. PYTHONDONTWRITEBYTECODE=1 python3 -W error::Warning -m unittest discover -s tests -t .

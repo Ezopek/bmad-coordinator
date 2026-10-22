@@ -13,6 +13,7 @@ from pathlib import Path
 from types import UnionType
 from typing import Any, Union, get_args, get_origin, get_type_hints
 
+from . import boundary
 from . import bill, bmad_contract, bmad_planning, bmad_review, clients, drive, drive_epic, drive_pipeline, inbox
 from .exporter import export_checkpoint, import_checkpoint
 from .installation import doctor
@@ -33,6 +34,8 @@ class Parser(argparse.ArgumentParser):
 CLIENT_HELP = ("worker client: codex-cli (default), claude-code or copilot (authors only); must match a bound "
                "assignment's client")
 TURNS_HELP = "claude-code only (default 60); refused for codex-cli and copilot"
+BOUNDARY_HELP = ("run the client in a bubblewrap sandbox (launch-boundary design); a binding that names a boundary "
+                 "uses it without the flag, and a flag cannot change it")
 DRIVE_DEFAULTS = {"max_turns": 20, "deadline_seconds": 7200.0, "human_wait_seconds": 0.0}
 RESOLVE_COST = ("The fence is released on operator evidence only: an unobserved descendant of this attempt may still "
                 "write, and the files it left stay unclaimed and are never bundled as observed work. That cost is the "
@@ -64,6 +67,9 @@ def _parser():
     diagnosed = leaf("doctor")
     diagnosed.add_argument("--base", required=True)
     diagnosed.add_argument("--client", help="also preflight this worker client (absolute binary and --version only)")
+    diagnosed.add_argument("--boundary", choices=boundary.KINDS,
+                           help="also check the launch boundary (a no-op sandbox, and with --client the client's "
+                                "--version inside its mount set); never a model call")
     worker = leaf("worker").add_subparsers(dest="action", required=True, parser_class=Parser)
     inspected = leaf("inspect", parent=worker)
     inspected.add_argument("id")
@@ -73,6 +79,7 @@ def _parser():
     launched.add_argument("--timeout", type=int, required=True)
     launched.add_argument("--client", help=CLIENT_HELP)
     launched.add_argument("--max-turns", type=int, help=TURNS_HELP)
+    launched.add_argument("--boundary", choices=boundary.KINDS, help=BOUNDARY_HELP)
     reconciled = leaf("reconcile", parent=worker, token=True)
     reconciled.add_argument("id")
     bmad = leaf("bmad").add_subparsers(dest="action", required=True, parser_class=Parser)
@@ -85,6 +92,7 @@ def _parser():
     bmad_run.add_argument("--timeout", type=int, required=True)
     bmad_run.add_argument("--client", help=CLIENT_HELP)
     bmad_run.add_argument("--max-turns", type=int, help=TURNS_HELP)
+    bmad_run.add_argument("--boundary", choices=boundary.KINDS, help=BOUNDARY_HELP)
     bmad_status = leaf("status", parent=bmad)
     bmad_status.add_argument("id")
     leaf("bundle", parent=bmad, token=True, stdin=True)
@@ -255,6 +263,20 @@ def _client_readiness(name: str) -> dict:
     return {"name": chosen.name, "binary": binary, "version": version, "ready": True, "reasons": [], **notes}
 
 
+def _boundary_readiness(kind: str, name: str | None, repo) -> dict:
+    """Launch-boundary L7 in doctor: the same checks as a boundary launch, without the run directory."""
+    env = clients.static_env(clients.get(name)) if name else dict(os.environ)
+    try:
+        binary, version = boundary.preflight(env)
+        if name is not None:
+            clients.boundary_ready(kind, clients.get(name), repo)
+    except DomainError as exc:
+        found = shutil.which("bwrap", path=env.get("PATH", os.defpath))
+        return {"kind": kind, "binary": os.path.abspath(found) if found else None, "version": None, "ready": False,
+                "reasons": [exc.message]}
+    return {"kind": kind, "binary": binary, "version": version, "ready": True, "reasons": []}
+
+
 def _pipeline(path: Path) -> dict:
     try:
         value = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -378,6 +400,11 @@ def _run(args):
             if not result["client"]["ready"]:
                 result["ready"] = False
                 result["reasons"] = result["reasons"] + [f"Worker client {args.client} is not ready"]
+        if args.boundary is not None:
+            result["boundary"] = _boundary_readiness(args.boundary, args.client, repo)
+            if not result["boundary"]["ready"]:
+                result["ready"] = False
+                result["reasons"] = result["reasons"] + [f"Boundary {args.boundary} is not ready"]
         return result
     if args.command == "init":
         return {"repository_id": open_store(repo, create=True, exclusive=True).repository_id}
@@ -410,7 +437,7 @@ def _run(args):
         owner = _owner(args.token_file, repo)
         if args.action == "run":
             return asdict(run_assignment(repo, store, owner, args.id, args.model, args.timeout, args.client,
-                                         args.max_turns))
+                                         args.max_turns, args.boundary))
         return asdict(reconcile_run(repo, store, owner, args.id))
     if args.command == "bmad":
         if args.action == "status":
@@ -420,7 +447,7 @@ def _run(args):
         owner = _owner(args.token_file, repo)
         if args.action == "run":
             return bmad_planning.run(repo, store, owner, args.id, args.model, args.timeout, args.client,
-                                     args.max_turns)
+                                     args.max_turns, args.boundary)
         if args.action == "bundle":
             return bmad_review.bundle_for_workspace(repo, store, owner, _record(bmad_review.BundleRequest, _object()))
         if args.action == "review":

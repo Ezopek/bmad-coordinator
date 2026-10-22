@@ -21,6 +21,7 @@ from pathlib import Path, PurePosixPath
 
 from . import clients, worker
 from .model import DecisionInput, DomainError
+from .repo import GIT_SAFE
 from .run_receipt import canonical, private_file, read_receipt
 from .service import JSON_FIELDS, Coordinator, _anchored_bytes, binding_anchor
 from .store import _require_local_ext4
@@ -167,7 +168,7 @@ def schema_of(request: dict) -> str:
 # Root ---------------------------------------------------------------------------------------------------------------
 
 def in_repository(path) -> bool:
-    return subprocess.run(["git", "-C", str(path), "rev-parse", "--show-toplevel"], capture_output=True,
+    return subprocess.run(["git", *GIT_SAFE, "-C", str(path), "rev-parse", "--show-toplevel"], capture_output=True,
                           stdin=subprocess.DEVNULL, env=_git_env()).returncode == 0
 
 
@@ -544,7 +545,7 @@ def _build(home: Path, repository_id: str, key: str, files: dict, hook) -> Path:
     hook("judgment-scratch-marked", key=key)
     cwd = scratch / "cwd"
     cwd.mkdir(mode=0o700)
-    result = subprocess.run(["git", "init", "-q", str(cwd)], capture_output=True, stdin=subprocess.DEVNULL,
+    result = subprocess.run(["git", *GIT_SAFE, "init", "-q", str(cwd)], capture_output=True, stdin=subprocess.DEVNULL,
                             env=_git_env())
     if result.returncode != 0:
         raise DomainError("BLOCKED_EVIDENCE", "Cannot git-initialise the judgment cwd")
@@ -781,7 +782,8 @@ def run(repo, store, owner, key: str, role: dict, root=None, hook=None):
                                    "scratch": str(scratch), "at": _now()})
     try:
         result = clients.run_isolated(role["client"], repo, scratch, scratch / "cwd", receipts, envelope,
-                                      SCHEMAS[name], role["model"], role["timeout"], role.get("max_turns"))   # D25
+                                      SCHEMAS[name], role["model"], role["timeout"], role.get("max_turns"),   # D25
+                                      role.get("boundary"))   # launch-boundary L1
     except (DomainError, OSError) as exc:
         if os.path.lexists(receipts):
             return _classify(store, owner, key, request_id, UNKNOWN, "refused-after-receipts", _detail(exc))

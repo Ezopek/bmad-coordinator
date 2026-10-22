@@ -10,10 +10,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import clients, profiles
+from . import boundary, clients, profiles
 from .installation import doctor
 from .model import DomainError, LaunchEvidence, OwnerRef, ReturnEvidence
-from .repo import RepoIdentity, resolve_repo
+from .repo import GIT_SAFE, RepoIdentity, resolve_repo
 from .run_receipt import (ReceiptEvidenceSource, canonical, delta, inventory, private_file,
                           read_receipt, receipt_ref, run_name, run_root, seal, stamp_json)
 from .service import (CONTINUATION_UNSUPPORTED, Coordinator, _scope_allows, binding_anchor, check_directory_alias,
@@ -71,7 +71,7 @@ def _check_checkout(repo: RepoIdentity, feature: dict) -> None:
     identity = resolve_repo(Path(feature["worktree"]))
     if identity != repo:
         raise DomainError("INVALID_REPOSITORY", "Recorded feature worktree or common directory differs")
-    branch = subprocess.run(["git", "-C", str(repo.worktree), "symbolic-ref", "--quiet", "--short", "HEAD"],
+    branch = subprocess.run(["git", *GIT_SAFE, "-C", str(repo.worktree), "symbolic-ref", "--quiet", "--short", "HEAD"],
                             capture_output=True, text=True)
     if branch.returncode != 0 or branch.stdout.strip() != feature["branch"]:
         raise DomainError("INVALID_REPOSITORY", "Feature branch differs or is detached")
@@ -381,6 +381,7 @@ def _validated_receipt(repo, store, assignment, directory, historical=False):
     if assignment["launch_ref"] not in (None, launch_ref):
         raise DomainError("UNKNOWN_EVIDENCE", "Stored launch reference differs")
     client = _recorded_client(launch, value, binding, events, assignment["id"])
+    _check_boundary(launch, binding)
     if "client" in launch:  # receipts written since the client registry also need a clean D16 record
         _clean_integrity(directory)
     if (launch.get("profile"), launch.get("binding_sha256"), value.get("profile")) != \
@@ -465,9 +466,33 @@ def _resolve_client(requested, binding):
     return chosen
 
 
-def _integrity(repo, directory, baseline, group) -> bool:
-    """D16: always written after the group drain and before any terminal classification."""
-    record = clients.integrity_record(repo, baseline, group)
+def _resolve_boundary(requested, binding):
+    """Launch-boundary L1: the flag, else the binding's boundary; a flag may add a boundary to a binding without
+    one, never change or drop the one a binding names."""
+    flag = boundary.check_kind(requested)
+    bound = boundary.check_kind(binding.get("boundary")) if binding is not None else None
+    if bound is not None and flag not in (None, bound):
+        raise DomainError("INVALID_INPUT", "Boundary conflicts with the assignment binding")
+    return flag or bound
+
+
+def _check_boundary(launch: dict, binding) -> None:
+    """Launch-boundary L5, at replay: a binding that names a boundary needs its record in the anchored launch
+    receipt, and any record there must be well formed and end with the client argv."""
+    kind = binding.get("boundary") if binding is not None else None
+    record = launch.get("boundary")
+    if kind is None and record is None:
+        return
+    problems = boundary.check_record(record, kind or (record.get("kind") if isinstance(record, dict) else None),
+                                     launch.get("argv"))
+    if problems:
+        raise DomainError("UNKNOWN_EVIDENCE", problems[0])
+
+
+def _integrity(repo, directory, baseline, group, git_before=None, state_before=None) -> bool:
+    """D16: always written after the group drain and before any terminal classification; F24 adds the Git
+    metadata comparison, before the coordinator's first Git call after the run."""
+    record = clients.integrity_record(repo, baseline, group, git_before, state_before)
     try:
         private_file(directory / "integrity.json", canonical(record))
     except OSError:
@@ -477,7 +502,7 @@ def _integrity(repo, directory, baseline, group) -> bool:
 
 def run_assignment(repo: RepoIdentity, store: Store, owner: OwnerRef, assignment_id: str,
                    model: str, timeout_seconds: int, client: str | None = None,
-                   max_turns: int | None = None) -> RunReport:
+                   max_turns: int | None = None, boundary_kind: str | None = None) -> RunReport:
     if type(model) is not str or not model.strip() or model.startswith("-") or type(timeout_seconds) is not int or \
        timeout_seconds <= 0:
         raise DomainError("INVALID_INPUT", "Worker model and positive timeout are required")
@@ -511,6 +536,7 @@ def run_assignment(repo: RepoIdentity, store: Store, owner: OwnerRef, assignment
     binding = ReceiptEvidenceSource(repo, assignment_id, assignment["request_fingerprint"], store).binding() \
         if profile_name else None
     chosen = _resolve_client(client, binding)
+    kind = _resolve_boundary(boundary_kind, binding)
     commands = clients.bound_commands(binding)
     if max_turns is not None and chosen.max_turns_default is None:
         raise DomainError("INVALID_INPUT", f"Worker client {chosen.name} does not take max turns")
@@ -538,12 +564,26 @@ def run_assignment(repo: RepoIdentity, store: Store, owner: OwnerRef, assignment
     if os.path.lexists(directory):
         raise DomainError("BLOCKED_EVIDENCE", "Run sidecar already exists; no relaunch")
     binary, version = clients.preflight(chosen)  # a missing or broken binary costs no attempt (D5)
+    plan = None
+    if kind is not None:   # launch-boundary L4, L7: checked before the reservation, so a refusal costs nothing
+        protected = clients.worktree_protected(repo)
+        sealed = (binding["sealed_root"],) if binding and binding.get("sealed_root") else ()
+        declared = ((binding or {}).get("project") or {}).get("boundary") or {}   # launch-boundary L4
+        extra = [boundary.Mount(mode, os.path.normpath(os.path.expanduser(path)))
+                 for mode in ("ro", "rw") for path in declared.get(mode, [])] if mode != "read-only" else []
+        plan = clients.plan_boundary(kind, chosen, binary, boundary.project_mounts(
+            "reviewer" if mode == "read-only" else "writer", directory, repo.worktree, repo.worktree, repo.common_dir,
+            sealed=sealed, others=tuple(protected[3:])), protected, commands, extra)
     # The owner-fenced reservation is authoritative; ordinary unmet dependencies and fences
     # must fail before consuming an irreversible sidecar. The baseline snapshot follows it.
     Coordinator(store).reserve_launch(owner, assignment_id, chosen.name)
     _check_inputs(repo.worktree, assignment)
     before = inventory(repo.worktree)
     baseline = clients.sealed_evidence(repo, name)
+    try:
+        git_before = clients.git_metadata(repo)   # F24, taken with the D16 baseline
+    except (OSError, ValueError, IndexError) as exc:
+        raise DomainError("INVALID_REPOSITORY", "Cannot read the worktree's Git metadata") from exc
     root.mkdir(mode=0o700, exist_ok=True)
     if root.is_symlink() or not root.is_dir():
         raise DomainError("UNSAFE_PATH", "Run directory is unsafe after reservation")
@@ -576,12 +616,23 @@ def run_assignment(repo: RepoIdentity, store: Store, owner: OwnerRef, assignment
     err_fd = os.open(directory / "stderr.log", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     try:
         with os.fdopen(out_fd, "wb") as output, os.fdopen(err_fd, "wb") as error:
-            process = None
+            process, state_before = None, None
             try:
-                process = subprocess.Popen(clients.spawn_argv(chosen, argv, envelope), cwd=repo.worktree,
-                                           stdin=subprocess.PIPE, stdout=output, stderr=error,
-                                           start_new_session=True, umask=0o077,
-                                           env={**clients.static_env(chosen), **run_env, **profile.env})
+                state_before = (chosen.name, clients.static_env(chosen),
+                                clients.persistent_state(chosen.name, clients.static_env(chosen)),
+                                repo.common_dir / "coordinator" / "quarantine" / name) if plan else None
+                spawned, record, copies = clients.boundary_launch(
+                    plan, repo.worktree, argv, clients.spawn_argv(chosen, argv, envelope)) if plan \
+                    else (clients.spawn_argv(chosen, argv, envelope), None, {})
+                try:
+                    process = subprocess.Popen(spawned, cwd=repo.worktree, pass_fds=tuple(copies.values()),
+                                               stdin=subprocess.PIPE, stdout=output, stderr=error,
+                                               start_new_session=True, umask=0o077,
+                                               env={**(clients.boundary_spawn_env(plan, clients.static_env(chosen))
+                                                       if plan else clients.static_env(chosen)), **run_env,
+                                                    **profile.env, **(plan.env if plan else {})})
+                finally:
+                    boundary.close(copies)
                 clients.own_group(process)
                 seal(directory / "launch-intent.json", clients.launch_intent(process.pid, directory, session))
                 launch = {"kind": "launch", "assignment_id": assignment_id,
@@ -603,6 +654,8 @@ def run_assignment(repo: RepoIdentity, store: Store, owner: OwnerRef, assignment
                     launch["max_turns"] = spec.max_turns
                 if profile_name:
                     launch.update(profile=profile_name, binding_sha256=bound["payload_digest"], env=profile.env)
+                if record is not None:   # launch-boundary L5, inside the launch digest
+                    launch["boundary"] = record
                 launch_digest = seal(directory / "launch.json", launch)
                 if scrub is not None:  # a sidecar, so Codex launch.json bytes stay unchanged
                     seal(directory / "env-scrub.json", scrub)
@@ -637,16 +690,18 @@ def run_assignment(repo: RepoIdentity, store: Store, owner: OwnerRef, assignment
                         "ended_at": datetime.now(timezone.utc).isoformat()}))
                 except OSError:
                     pass
-                _integrity(repo, directory, baseline, group)
+                _integrity(repo, directory, baseline, group, git_before, state_before)
                 if isinstance(exc, (OSError, DomainError, subprocess.SubprocessError)):
                     return _report(assignment_id, "unknown", directory, ["launch or process evidence interrupted"])
                 raise
-        clean = _integrity(repo, directory, baseline, group)
+        clean = _integrity(repo, directory, baseline, group, git_before, state_before)
         if timed_out:
             return _report(assignment_id, "unknown", directory, ["timeout; descendants and hooks may remain"])
         if not clean:
             return _report(assignment_id, "unknown", directory,
-                           ["sealed evidence changed during the run or the process group survived termination"])
+                           ["sealed evidence or the worktree's Git metadata (config, hooks, attributes, exclude, the "
+                            "worktree pointer) changed during the run, or the process group survived termination; "
+                            "the coordinator ran no Git command after it"])
         try:
             after = inventory(repo.worktree)
             # design D25: after a non-zero exit only a client stop, read from the stream, goes on

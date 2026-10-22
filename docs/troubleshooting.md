@@ -14,6 +14,20 @@ Symptoms in the order you are likely to meet them, each with its cause and the w
 
 **The client is installed but not logged in.** `doctor` cannot tell: it runs `--version` only. The first attempt then ends without a return: the client exits non-zero, the attempt is recorded `unknown` with its fence held ("Worker process exited unsuccessfully" among its evidence needs) and the run stops `attempt-unknown`. Read the client's own output in `.git/coordinator/runs/<run>/` (the retained stream), log in by hand (one prompt, `claude -p 'reply with ok'` or `codex exec 'reply with ok'`, as the same OS user), then free the attempt as under [A killed or stalled attempt](#a-killed-or-stalled-attempt). A Copilot `model` the account cannot use ends the same way.
 
+### The launch boundary
+
+`UNSUPPORTED_CLIENT_MODE` (exit 4) naming `boundary bwrap is not usable`, before any reservation:
+
+- `bwrap is not on PATH`: install bubblewrap.
+- `a no-op sandbox failed: setting up uid map: Permission denied` (or similar): unprivileged user namespaces are denied, on Ubuntu 24.04 by AppArmor (`kernel.apparmor_restrict_unprivileged_userns`). Lifting that is your call.
+- `<client> --version fails inside it`: the client needs a runtime path the defaults miss. The message has its last output line.
+- `<path> reaches the protected <path>`: a state or project mount is, or leads by a symlink to, the repository's Git directory, the coordinator's store or another worktree.
+- `no Copilot token`: set `COPILOT_GITHUB_TOKEN` (narrowest: a fine-grained token with Copilot access only), or log in with `gh`.
+
+A drive's judgment refused the same way stops `needs-human` with `judgment-preflight` and leaves the judgment key unused.
+
+A run that ends `unknown` with "Git metadata … changed" or "a persistent entry of the client's state" is listed in its `integrity.json` (`git_metadata_changed`, `client_state_changed`). A client-state entry the run created was moved to `runs/<run>/quarantine/` (`client_state_quarantined`); look at it before you move anything back.
+
 ## Environment stops
 
 **`verify-env`.** The setup commands or the baseline (your verify commands on the base commit, before any model is launched) failed in the story worktree, or Git is older than 2.40. The summary's `failed` lists the command names, or "git >= 2.40 required"; the records under `.git/coordinator/story/<feature>/` (`setup-*.json`, `baseline-*.json`) hold each command's exit code and output. The usual causes:

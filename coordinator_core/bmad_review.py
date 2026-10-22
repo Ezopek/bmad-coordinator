@@ -50,6 +50,7 @@ class ReviewPrepare:
     lenses: list[str] = field(default_factory=lambda: list(DEFAULT_LENSES))
     client_root: str = ".agents/skills"
     client: str = clients.DEFAULT                # registered write-free worker client
+    boundary: str | None = None                  # launch-boundary L1; recorded in the binding when set
 
 
 def _bad(message: str) -> DomainError:

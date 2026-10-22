@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from .model import BindingEvidence, DomainError, LaunchEvidence, ReturnEvidence, ReviewEvidence
-from .repo import RepoIdentity
+from .repo import GIT_SAFE, RepoIdentity
 from .store import Store, open_store
 
 
@@ -46,7 +46,7 @@ def _safe_path(text: str) -> bool:
 def inventory(worktree: Path) -> dict[str, FileStamp]:
     """Snapshot tracked and nonignored untracked paths, including symlink bytes."""
     try:
-        raw = subprocess.run(["git", "-C", str(worktree), "ls-files", "-z", "--cached", "--others",
+        raw = subprocess.run(["git", *GIT_SAFE, "-C", str(worktree), "ls-files", "-z", "--cached", "--others",
                               "--exclude-standard"], check=True, capture_output=True).stdout
     except (OSError, subprocess.CalledProcessError) as exc:
         raise DomainError("UNKNOWN_EVIDENCE", "Cannot inventory Git worktree") from exc

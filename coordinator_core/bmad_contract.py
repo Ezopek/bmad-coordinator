@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from .model import DomainError
+from .repo import GIT_SAFE
 from .run_receipt import canonical
 
 REQUIRED = ("bmad-prd", "bmad-architecture", "bmad-review")
@@ -345,7 +346,7 @@ def discover(worktree: Path, client_root: str = ".agents/skills") -> ContractRep
     capabilities["uv"] = bool(uv)
     if not uv:
         reasons.append("uv is not on PATH")
-    head = subprocess.run(["git", "-C", str(worktree), "rev-parse", "HEAD"], capture_output=True, text=True)
+    head = subprocess.run(["git", *GIT_SAFE, "-C", str(worktree), "rev-parse", "HEAD"], capture_output=True, text=True)
     sibling = {skill: ("absent" if not (worktree / ".claude/skills" / skill).is_dir() else
                        "same" if _tree_digest(worktree / ".claude/skills" / skill) == _tree_digest(base / skill)
                        else "differs") for skill in skills} if client_root != ".claude/skills" else {}

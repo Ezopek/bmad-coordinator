@@ -559,7 +559,7 @@ class PrepareTests(StoryCase):
         # replays
         spec = impl.ImplementationPrepare(feature_id=self.fid, key="i1", author_id="story-worker", project=PROJECT)
         legacy = {key: value for key, value in asdict(spec).items()
-                  if key not in ("web", "kind", "revises", "continues_stop")}
+                  if key not in ("web", "kind", "revises", "continues_stop", "boundary")}   # launch-boundary L1
         self.assertEqual(hashlib.sha256(canonical(legacy)).hexdigest(), impl.read_assignment_binding(
             self.store, self.story_repo, off["assignment_id"])["spec_sha256"])
         self.assertEqual("web must be a boolean", self.code("INVALID_INPUT", self.prep, key="i3", web=1).message)

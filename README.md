@@ -37,7 +37,7 @@ What it costs you: one story at a time; Linux and ext4; a backlog in a supported
 
 ## Requirements in short
 
-Linux with the repository on a local ext4 filesystem (the only one the store's locking and durability were probed on; WSL2 is fine when the repository lives on the Linux side), Python 3.11 or newer with the standard library only, Git 2.40 or newer, and at least one agent CLI installed and logged in. The full list, with what each client can do: [Prerequisites](docs/getting-started.md#prerequisites).
+Linux with the repository on a local ext4 filesystem (the only one the store's locking and durability were probed on; WSL2 is fine when the repository lives on the Linux side), Python 3.11 or newer with the standard library only, Git 2.40 or newer, and at least one agent CLI installed and logged in; optionally bubblewrap, to run the agents in a sandbox. The full list, with what each client can do: [Prerequisites](docs/getting-started.md#prerequisites).
 
 ## Start here
 

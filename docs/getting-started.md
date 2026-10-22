@@ -20,6 +20,8 @@ This page takes you from nothing to a finished epic on the bundled example, then
 
 `doctor --client NAME` resolves the binary and runs `--version`, nothing more: it tells you the client is there, not that it is logged in. Run one prompt by hand (`claude -p 'reply with ok'`, `codex exec 'reply with ok'`) before the first drive.
 
+**Optionally, bubblewrap** (`bwrap`, 0.11.1 is the version tested) for the [launch boundary](#run-the-workers-in-a-sandbox), with unprivileged user namespaces allowed. Ubuntu 24.04 restricts them through AppArmor by default; `doctor --boundary bwrap` names that as the reason.
+
 **A scratch directory on ext4 outside the repository** for `--judgment-root`: the judgment runs there, isolated from the worktrees. Any epic whose pipeline allows judgments (`budgets.max_judgments` above zero) needs it.
 
 **Money and time.** A three-story epic on the example costs about USD 1.5 with Claude Sonnet workers and Claude Opus reviewers and takes six to eight minutes; a real project with Opus everywhere ran at USD 17 to 22 per epic of two or three stories, with a single long implementation attempt at USD 4 to 8. Observed figures, not estimates: see [Costs](#costs) and the [model selection guide](model-selection-guide.md).
@@ -184,6 +186,25 @@ setsid nohup bash -c 'run epic start ... < epic-input.json > epic-run-1.json 2> 
 
 `--human-wait SECONDS` keeps the driver waiting at a stop for an inbox decision instead of exiting, when you are around. `run epic status --epic ID` shows the current story's run, its last stop and the inbox at any time, without a token and without blocking the driver.
 
+### Run the workers in a sandbox
+
+Add `"boundary": "bwrap"` to a pipeline role (`worker`, `reviewer`, `judgment`) and that role's client process and everything it starts run in a bubblewrap sandbox ([design](launch-boundary-design.md)).
+
+- **What it can reach.** The sandbox holds the system read-only, an empty home, the client's own runtime and state, the run's own directory and the project paths of the launch: a worker gets the story worktree read-write, a reviewer gets it read-only plus the sealed copy it reviews, and a judgment gets only its scratch copies.
+- **What stays outside.** Git's metadata (hooks, config, refs, the index) is read-only. The coordinator's store, the other runs' receipts, your other repositories and the rest of your home do not exist inside.
+- **What the client keeps.** Its own state stays writable for its login, but the entries that a later session reads (settings and their hooks, instructions, plugins, skills, memories) are read-only; one a run creates is moved to the run's quarantine.
+- **The environment.** It is an allowlist: the base variables and the client's own; the launch receipt names what was dropped.
+
+Before the first drive, check the boundary without a model call:
+
+```sh
+run doctor --base "$(git rev-parse HEAD)" --client claude-code --boundary bwrap
+```
+
+A worker that runs your tests itself may need more than the defaults, such as a package cache or a toolchain under your home. Add them to the pipeline's project block, read-only or read-write: `"boundary": {"ro": ["~/.cache/uv"], "rw": ["~/.npm"]}`. A path that reaches the repository's Git directory or the coordinator's store is refused. The coordinator's own setup and verify commands run outside the sandbox, as before.
+
+The boundary does not confine the network (the clients need their APIs), and it does not hide a client's own credentials from that client.
+
 ### Stops
 
 A stop is a JSON summary with exit `11`, a closed `reason` and an `operator_action` written for that stop; the epic's `epic_action` adds the skip or restart option when one applies. The ones you will meet first:
@@ -222,9 +243,9 @@ Observed before the bill existed, with the clients' own cost reports read by han
 
 Read this before the first drive on a repository you care about.
 
-- **Workers run as you.** Every client runs as the coordinator's OS user with the operator's environment. Claude Code confinement is advisory tool policy, not an OS sandbox: a story worker is allowed the shell commands your `setup` and `verify` commands start with (`Bash(python3 *)` for a `python3` verify command), and a test runner executes the code the worker wrote, so a Claude story worker can run arbitrary code as you, inside and outside the worktree, with network access. Codex runs in its own `workspace-write` sandbox (writes inside the worktree, no network unless `web: true`). Copilot's approval policy is advisory; its shell runs with your access.
+- **Workers run as you.** Every client runs as the coordinator's OS user with the operator's environment. Claude Code confinement is advisory tool policy, not an OS sandbox: a story worker is allowed the shell commands your `setup` and `verify` commands start with (`Bash(python3 *)` for a `python3` verify command), and a test runner executes the code the worker wrote, so a Claude story worker can run arbitrary code as you, inside and outside the worktree, with network access. With `"boundary": "bwrap"` on the role, that reach ends at the sandbox's mounts ([Run the workers in a sandbox](#run-the-workers-in-a-sandbox)); without it, the rest of this paragraph holds. Codex runs in its own `workspace-write` sandbox (writes inside the worktree, no network unless `web: true`). Copilot's approval policy is advisory; its shell runs with your access.
 - **The audit is Git, not the sandbox.** The coordinator records the worktree's change set at return, refuses writes outside the scopes and to protected paths, runs your verify commands on the committed attempt, seals every receipt and has a second model review the diff. That catches what reached the worktree; it does not see reads, network traffic or writes elsewhere.
-- **Secrets.** Workers inherit the environment because they need their own credentials (Claude's OAuth or API variables, `OPENAI_*`, `GH_TOKEN`). The coordinator removes a parent agent session's `CLAUDE*` variables except the documented authentication ones, and records variable names (never values) in the launch receipt. Run drives from a shell that exports as little as possible; the names that passed are in `runs/<run>/launch.json`.
+- **Secrets.** Workers inherit the environment because they need their own credentials (Claude's OAuth or API variables, `OPENAI_*`, `GH_TOKEN`). The coordinator removes a parent agent session's `CLAUDE*` variables except the documented authentication ones, and records variable names (never values) in the launch receipt. Run drives from a shell that exports as little as possible; the names that passed are in `runs/<run>/launch.json`. Under the launch boundary the environment is an allowlist instead (the base variables and the client's own; the receipt names what was dropped).
 - **Delegation is the risk you choose.** The judgment answers questions by citing your clauses and the accepted spec; a worker can phrase a question to steer it. Keep clauses narrow, keep `spec_auto_accept` off for stories whose spec you want to read, and keep `accept_on_high` off unless you will read the findings afterwards. A reviewer's finding is a model claim; `critical` blocks acceptance, `high` stops the run by default, `medium` and `low` are listed.
 - **The coordinator never pushes, merges onward or opens a pull request.** It only ever writes to the branches it created (`coordinator/epic-<N>`, `story/<key>`) and to `.git/coordinator/`, and merges the base branch into its own integration branch.
 

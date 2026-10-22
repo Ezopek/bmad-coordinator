@@ -16,13 +16,13 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
-from . import backlog, clients
+from . import backlog, boundary, clients
 from .bmad_planning import KEY, _file_entry, _review_items, _row, _write_brief, refuse_while_running
 from .bmad_planning import read_assignment_binding as _bound_binding
 from .model import DomainError, FeatureInput
 from .backlog_bmad import (_settles, _split_field, ARTIFACTS_DIR, EpicStory, READY, _ARCHIVE, _DECISION_DATE, _DW, _DW_ID, _FIELD, _LABEL_MARKUP, _LEDGER, _SECTION_END, _STATUS_LINE, _STORY_HEADING, _epic_entry, _epic_of, _in_sprint_status, _ledger_entries, _one_line, _plain, _read_at, _shape, _styled, _unquote, append_deferred_work, parse_epic_story, preconditions_section, preconditions_state, sync_sprint_status)   # backlog design A2: the BMAD layout's code, moved
 from .profiles import ReturnProfile
-from .repo import resolve_repo
+from .repo import GIT_SAFE, resolve_repo
 from .run_receipt import canonical, private_file, seal_binding
 from .service import TERMINAL_STATES, Coordinator, _anchored_bytes, _safe_feature_paths, _scope_allows, \
     binding_anchor, decision_digest, scope_covers
@@ -205,7 +205,7 @@ def clauses_of_project(project_clauses) -> list[dict]:
 
 def _git(path, *args: str) -> str:
     try:
-        return subprocess.run(["git", "-C", str(path), *args], check=True, capture_output=True, text=True,
+        return subprocess.run(["git", *GIT_SAFE, "-C", str(path), *args], check=True, capture_output=True, text=True,
                               stdin=subprocess.DEVNULL).stdout.strip()
     except (OSError, subprocess.CalledProcessError) as exc:
         detail = exc.stderr.strip() if isinstance(exc, subprocess.CalledProcessError) else str(exc)
@@ -320,7 +320,7 @@ def story_add(repo, store, owner, spec: StoryInput) -> dict:
     except BaseException:
         # Git creates the branch before it checks the target. The branch was absent above, and `branch -D` refuses a
         # branch checked out in any worktree; no `worktree remove` here, the target may be another registration.
-        subprocess.run(["git", "-C", str(repo.worktree), "branch", "-D", branch], capture_output=True,
+        subprocess.run(["git", *GIT_SAFE, "-C", str(repo.worktree), "branch", "-D", branch], capture_output=True,
                        stdin=subprocess.DEVNULL)
         raise
     try:
@@ -329,9 +329,9 @@ def story_add(repo, store, owner, spec: StoryInput) -> dict:
             *mandate, {"delegated": delegated}, branch, spec.base_ref, base_commit, str(identity.worktree), [],
             list(spec.writable_scopes) + ([spec_path] if epic is not None else [])))
     except BaseException:
-        subprocess.run(["git", "-C", str(repo.worktree), "worktree", "remove", "--force", str(target)],
+        subprocess.run(["git", *GIT_SAFE, "-C", str(repo.worktree), "worktree", "remove", "--force", str(target)],
                        capture_output=True, stdin=subprocess.DEVNULL)
-        subprocess.run(["git", "-C", str(repo.worktree), "branch", "-D", branch], capture_output=True,
+        subprocess.run(["git", *GIT_SAFE, "-C", str(repo.worktree), "branch", "-D", branch], capture_output=True,
                        stdin=subprocess.DEVNULL)
         raise
     return {"feature_id": feature_id, "branch": branch, "base_commit": base_commit, "worktree": str(identity.worktree),
@@ -349,10 +349,10 @@ def git_delta(worktree: Path, base_commit: str, scopes) -> dict:
     that exist (added, modified, type-changed, rename targets, untracked non-ignored), `deleted` the tracked paths
     that no longer exist (deletions and rename sources), `renamed` the pairs Git detects."""
     try:
-        raw = subprocess.run(["git", "-C", str(worktree), "diff", "--name-status", "-z", "--find-renames",
+        raw = subprocess.run(["git", *GIT_SAFE, "-C", str(worktree), "diff", "--name-status", "-z", "--find-renames",
                               "--diff-filter=ACDMRT", base_commit, "--"], check=True, capture_output=True,
                              stdin=subprocess.DEVNULL).stdout
-        others = subprocess.run(["git", "-C", str(worktree), "ls-files", "-z", "--others", "--exclude-standard"],
+        others = subprocess.run(["git", *GIT_SAFE, "-C", str(worktree), "ls-files", "-z", "--others", "--exclude-standard"],
                                 check=True, capture_output=True, stdin=subprocess.DEVNULL).stdout
     except (OSError, subprocess.CalledProcessError) as exc:
         raise DomainError("UNKNOWN_EVIDENCE", "Cannot read the Git delta of the story worktree") from exc
@@ -476,6 +476,7 @@ class ImplementationPrepare:
     kind: str = "implement"   # design D24: "spec" prepares the spec author (bmad_spec_author)
     revises: str | None = None   # ruling P13: the operator's spec revise decision a spec author update carries
     continues_stop: bool = False   # design D25: continues a client-stopped attempt
+    boundary: str | None = None   # launch-boundary L1; recorded in the binding when set
 
 
 def spec_digest(spec: ImplementationPrepare) -> str:
@@ -491,6 +492,8 @@ def spec_digest(spec: ImplementationPrepare) -> str:
         del data["web"]
     if data["kind"] == "implement":
         del data["kind"]
+    if data["boundary"] is None:
+        del data["boundary"]
     return hashlib.sha256(canonical(data)).hexdigest()
 
 
@@ -935,6 +938,8 @@ def prepare(repo, store, owner, spec: ImplementationPrepare) -> dict:
              "scopes": list(scopes), "project": spec.project, "continues": continues}
     if spec.client != clients.DEFAULT:
         value["client"] = spec.client
+    if boundary.check_kind(spec.boundary):   # launch-boundary L1, sealed only when set
+        value["boundary"] = spec.boundary
     if commands:
         value["commands"] = commands
     if spec.web:   # design D23: sealed only when on, so a binding without web keeps its bytes

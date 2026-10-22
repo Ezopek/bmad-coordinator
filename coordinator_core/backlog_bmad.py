@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 
 from .model import DomainError
+from .repo import GIT_SAFE
 
 
 def _invalid(message: str) -> DomainError:
@@ -77,7 +78,7 @@ def _one_line(value) -> str:
 
 def _read_at(repo, commit: str, path: str, what: str) -> str:
     try:
-        return subprocess.run(["git", "-C", str(repo.worktree), "show", f"{commit}:{path}"], check=True,
+        return subprocess.run(["git", *GIT_SAFE, "-C", str(repo.worktree), "show", f"{commit}:{path}"], check=True,
                               capture_output=True, stdin=subprocess.DEVNULL).stdout.decode("utf-8")
     except (OSError, subprocess.CalledProcessError, UnicodeDecodeError) as exc:
         raise _invalid(f"{what} {path} is not readable at commit {str(commit)[:12]}") from exc
@@ -149,7 +150,7 @@ def _epic_entry(repo, base_commit: str, story_key: str, epics_path: str, spec_pa
         raise _invalid(f"Story key {story_key} is not in the epics file") from None
     if not entry.acceptance:
         raise _invalid(f"Story key {story_key} has no acceptance criteria in the epics file")
-    if subprocess.run(["git", "-C", str(repo.worktree), "cat-file", "-e", f"{base_commit}:{spec_path}"],
+    if subprocess.run(["git", *GIT_SAFE, "-C", str(repo.worktree), "cat-file", "-e", f"{base_commit}:{spec_path}"],
                       capture_output=True, stdin=subprocess.DEVNULL).returncode == 0:
         raise _invalid(f"Story spec {spec_path} exists at the base commit")
     return entry
