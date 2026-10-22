@@ -998,6 +998,7 @@ def start(repo, spec: EpicInput, template, token_path: Path, bounds: RunBounds, 
     _bounds_check(sample, bounds)
     _check_overrides(template, value["stories"], bounds)
     root = drive._judgment_root(repo, sample, judgment_root)
+    drive_pipeline.check_read_reviews(sample)   # Copilot reviewer design V8: nothing created on a refusal
     worktree = Path(value["worktrees_dir"]) / f"epic-{value['epic']}"
     if _rev(repo.worktree, f"refs/heads/{value['branch']}") is not None:
         raise Refusal("INVALID_INPUT", f"Branch {value['branch']} exists", "branch-exists",

@@ -77,7 +77,7 @@ def spec_digest(spec) -> str:
     data = asdict(spec)
     if data.get("client") == clients.DEFAULT:
         del data["client"]
-    for key, unset in (("corrects_review", None), ("finding_ids", []), ("boundary", None)):
+    for key, unset in (("corrects_review", None), ("finding_ids", []), ("boundary", None), ("mode", None)):
         if key in data and data[key] == unset:
             del data[key]
     return hashlib.sha256(canonical(data)).hexdigest()
@@ -85,9 +85,11 @@ def spec_digest(spec) -> str:
 
 def client_binding(spec) -> dict:
     """The binding carries the client only when it is not the default, so Codex bindings keep their bytes, and the
-    boundary only when set (launch-boundary L1)."""
+    boundary and the mode only when set (launch-boundary L1, Copilot reviewer design V1)."""
     kind = boundary.check_kind(getattr(spec, "boundary", None))
-    return ({} if spec.client == clients.DEFAULT else {"client": spec.client}) | ({"boundary": kind} if kind else {})
+    mode = getattr(spec, "mode", None)
+    return ({} if spec.client == clients.DEFAULT else {"client": spec.client}) | \
+        ({"boundary": kind} if kind else {}) | ({"mode": mode} if mode else {})
 
 
 RULED_CLIENTS = (clients.CLAUDE.name, clients.COPILOT.name)  # clients whose author argv renders exact command rules

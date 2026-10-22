@@ -624,7 +624,9 @@ class Coordinator:
         chosen = clients.get(client) if client is not None else bound_client or clients.get(None)
         if bound_client is not None and chosen.name != bound_client.name:
             raise DomainError("INVALID_INPUT", "Worker client conflicts with the assignment binding")
-        if current["permission_mode"] == "read-only" and not chosen.write_free_readonly:
+        read = bound is not None and self._bound_binding(bound).get("mode") == "read"   # Copilot reviewer design V1
+        if current["permission_mode"] == "read-only" and not chosen.write_free_readonly and \
+           not (read and chosen.read_mode):
             raise DomainError("UNSUPPORTED_CLIENT_MODE",
                               f"Worker client {chosen.name} has no write-free read-only mode")
         if name is not None:

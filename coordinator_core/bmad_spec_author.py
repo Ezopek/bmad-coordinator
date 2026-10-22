@@ -140,18 +140,11 @@ def _entries(items) -> bool:
         for item in items)
 
 
-def _same(text: str) -> str:
-    """A question or an option label as compared (ruling R2, findings F18, F21 and F22): code quotes dropped,
-    whitespace collapsed and a trailing full stop dropped, so a return that quotes the file's entry without its
-    Markdown code marks, or ends the sentence where the file's entry runs on into its options, still names it."""
-    return " ".join(text.replace("`", "").split()).rstrip(". ")
-
-
 def _compared(items) -> list:
-    """What the return and the file share entry by entry (ruling R2): the id, the question and the option labels (both
-    as `_same`)."""
-    return [(item["id"], _same(item["question"]), [_same(option["label"]) for option in item["options"]])
-            for item in items]
+    """What the return and the file must share entry by entry (findings F18, F21, F22 and F25): the id and the number
+    of options. The words are the file's: the record keeps the file's entries, so a return that rewords one still
+    names it, and nothing downstream reads the return's copy."""
+    return [(item["id"], len(item["options"])) for item in items]
 
 
 def _sealed_text(binding: dict, run_dir) -> tuple[str, str]:
@@ -173,8 +166,8 @@ def check(final, assignment, binding, run_dir, observed_changed) -> dict:
     Git delta) without tasks and verification; the attempt changes the spec file only; `open_questions` and
     `assumptions` are typed; a `completed` return has no open question and changed the spec file, which has no
     `## Open Questions` section and the status `ready-for-dev`; a `needs-decision` return's `open_questions` equal the
-    spec's entries (ids; questions and option labels with code quotes and whitespace aside) and its aggregate asks the
-    entries' questions in order. A
+    spec's entries in ids and option counts, its aggregate asks as many questions, and the payload keeps the file's
+    entries (finding F25). A
     `completed` return that changed nothing is an empty claim (ruling P14): the driver's empty-attempt rule stops it."""
     payload = implementation.check({**final, "tasks": [], "verification": []}, assignment, binding, run_dir,
                                    observed_changed)
@@ -190,13 +183,13 @@ def check(final, assignment, binding, run_dir, observed_changed) -> dict:
                                                                                _status(text) != READY)):
         raise _bad(f"a completed spec attempt leaves {binding['spec_path']} with no `## Open Questions` section and "
                    f"the status {READY}, and open_questions empty")
+    entries = questions
     if final["result"] == "needs-decision":
         entries = parse_open_questions(text) if text is not None else []
-        if not questions or _compared(questions) != _compared(entries) or \
-           [_same(item) for item in payload["questions"]] != [_same(item["question"]) for item in entries]:
+        if not questions or _compared(questions) != _compared(entries) or len(payload["questions"]) != len(entries):
             raise _bad("open_questions differ from the spec's Open Questions section")
     kept = {key: value for key, value in payload.items() if key not in ("tasks", "verification")}
-    return {**kept, "open_questions": questions, "assumptions": assumptions, "spec_sha256": sha256}
+    return {**kept, "open_questions": entries, "assumptions": assumptions, "spec_sha256": sha256}
 
 
 PROFILE = ReturnProfile(
@@ -302,6 +295,17 @@ def _story_scopes(feature: dict, story: dict) -> list[str]:
 def prepare(repo, store, owner, spec: implementation.ImplementationPrepare) -> dict:
     """The spec author's prepare: `bmad_implementation.prepare` with kind `spec`."""
     return implementation.prepare(repo, store, owner, replace(spec, kind="spec"))
+
+
+def read_extras(repo, store, feature: dict, manifest: dict) -> list[dict]:
+    """Copilot reviewer design V2, the spec review: the project rules and context paths of the brief's Read first,
+    each at the bundle's commit (the author's binding names them only); a reviewer may read them, the spec itself is
+    the sealed artifact it reads in full."""
+    story = json.loads(feature["constraints_json"])
+    project = implementation.read_assignment_binding(store, repo, manifest["commit"]["assignment_id"])["project"]
+    _, context_paths, _, _ = sources(repo, feature, story, project)
+    return [{"kind": "context", "path": path, "source": {"commit": manifest["commit"]["sha"], "path": path},
+             "required": False} for path in [*project.get("rules", []), *context_paths]]
 
 
 def review_brief(spec, worktree, sealed, bundle: dict, feature: dict, manifest: dict, decisions, carried, store, repo,

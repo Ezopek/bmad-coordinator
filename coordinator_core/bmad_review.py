@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import bmad_contract as contract
-from . import bundles, clients
+from . import boundary, bundles, clients
 from .bmad_implementation import SPEC_AUTHOR, STORY_PROFILES
 from .bmad_planning import (AFFECTED_IDS_RULE, PLAN, REVIEW, _file_entry, _row, _write_brief, client_binding,
                             client_label, effective_dependencies, read_assignment_binding, refuse_while_running,
@@ -51,6 +51,7 @@ class ReviewPrepare:
     client_root: str = ".agents/skills"
     client: str = clients.DEFAULT                # registered write-free worker client
     boundary: str | None = None                  # launch-boundary L1; recorded in the binding when set
+    mode: str | None = None                      # Copilot reviewer design V1: "read", a Copilot reviewer only
 
 
 def _bad(message: str) -> DomainError:
@@ -303,7 +304,14 @@ def _invalid(message: str) -> DomainError:
 def _validate(spec: ReviewPrepare) -> None:
     if type(spec.client) is not str:
         raise _invalid("Worker client must be a registered client name")
-    if not clients.get(spec.client).write_free_readonly:
+    if spec.mode is not None:   # Copilot reviewer design V1: the read mode, under the launch boundary only
+        if spec.mode != "read":
+            raise _invalid("Review mode must be read or absent")
+        if not clients.get(spec.client).read_mode:
+            raise DomainError("UNSUPPORTED_CLIENT_MODE", f"Worker client {spec.client} has no read mode")
+        if boundary.check_kind(spec.boundary) is None:
+            raise _invalid("A read-mode review needs boundary bwrap")
+    elif not clients.get(spec.client).write_free_readonly:
         raise DomainError("UNSUPPORTED_CLIENT_MODE", f"Worker client {spec.client} has no write-free read-only mode")
     if not KEY.match(spec.key or "") or not spec.reviewer_id.strip():
         raise _invalid("Key and reviewer are required")
@@ -368,6 +376,32 @@ SEVERITY_RULES = [
     "- A `critical` disposition of a carried item counts like a `critical` finding: either one sets the review's "
     "`critical_open`, which the coordinator derives (you never return it) and which blocks acceptance.",
 ]
+
+
+# Copilot reviewer design V2, V5, V6: a read-mode review's return rules and its staged inputs. The reviewer cannot hash,
+# so `bundle_read` is left out of its return; the coordinator observes which files it read in full.
+READ_REVIEW_RULES = [rule for rule in REVIEW_RULES if "`bundle_read`" not in rule]
+
+
+def read_inputs(worktree: Path, sealed: list[dict], extras: list[dict]) -> list[dict]:
+    """The staged input set: each sealed file, then the profile's extras (the code review's diff and spec, the spec
+    review's rules and context), under an inert alias numbered across the whole set. An extra without a bound digest
+    is read now from its commit, so a missing or irregular one refuses the prepare."""
+    entries = [{"kind": item["kind"], "path": item["path"], "digest": item["digest"],
+                "source": {"file": item["sealed_path"]}, "required": True} for item in sealed] + list(extras)
+    return [{"alias": bundles.read_alias(item["kind"], index, item["path"]), "path": item["path"],
+             "kind": item["kind"], "required": item["required"], "source": item["source"],
+             "digest": item.get("digest") or hashlib.sha256(bundles.input_bytes(worktree, item["source"])).hexdigest()}
+            for index, item in enumerate(entries)]
+
+
+def read_section(inputs: list[dict]) -> str:
+    lines = ["", "## Read-mode inputs (your only files)",
+             "Each line is a staged file under your cwd, then the path it stands for: read the staged file, cite the "
+             "path in a finding's `location`. Read every file marked `read in full` whole, with `view`."]
+    lines += [f"- `{item['alias']}` is `{item['path']}` ({item['kind']}; "
+              f"{'read in full' if item['required'] else 'read as needed'})" for item in inputs]
+    return "\n".join(lines) + "\n"
 
 
 def _planning_binding(store, events, assignment_id: str) -> dict:
@@ -513,6 +547,9 @@ def review_prepare(repo, store, owner, spec: ReviewPrepare) -> dict:
         raise _invalid("A code review takes no compatibility decision")
     if not code and not spec.compat_decision_id:
         raise _invalid("A planning review needs a compatibility decision")
+    if spec.mode == "read" and not code:   # Copilot reviewer design V2: the planning profile is not staged yet
+        raise DomainError("UNSUPPORTED_STEP", "The read mode for a planning review is not implemented yet; give the "
+                          "reviewer role to claude-code or codex-cli")
     report = None
     if not code:
         report = contract.discover(worktree, spec.client_root)
@@ -535,6 +572,17 @@ def review_prepare(repo, store, owner, spec: ReviewPrepare) -> dict:
         raise DomainError("BLOCKED_EVIDENCE", "; ".join(reasons))
     carried = _carried(repo, store, contributors)
     sealed = _sealed_files(bundle, manifest)
+    inputs, read_profile = [], None
+    if spec.mode == "read":   # Copilot reviewer design V2, V8: the staged input set, and every refusal before a key
+        read_profile = "spec-review" if spec_bundle else "code-review"
+        chosen = clients.get(spec.client)
+        clients.read_ready(chosen, clients.preflight(chosen)[1], read_profile)
+        clients.boundary_ready(spec.boundary, chosen, repo)
+        from . import bmad_implementation, bmad_spec_author
+        extras = (bmad_spec_author.read_extras(repo, store, feature, manifest) if spec_bundle else
+                  bmad_implementation.read_extras(store, feature, manifest))
+        inputs = read_inputs(worktree, sealed, extras)
+    shown = [{**item, "sealed_path": entry["alias"]} for item, entry in zip(sealed, inputs)] if inputs else sealed
     if code:
         from . import bmad_implementation as implementation
         project = _planning_binding(store, snapshot["events"], contributors[0]["id"]).get("project")
@@ -546,13 +594,15 @@ def review_prepare(repo, store, owner, spec: ReviewPrepare) -> dict:
     own, inherited = _provenance(store, snapshot, manifest["source_assignment_ids"])
     if spec_bundle:
         from . import bmad_spec_author
-        text = bmad_spec_author.review_brief(spec, worktree, sealed, bundle, feature, manifest, decisions, carried,
-                                             store, repo, snapshot)
+        text = bmad_spec_author.review_brief(spec, worktree, shown, bundle, feature, manifest, decisions, carried,
+                                             store, repo, snapshot)   # V2: a read review sees the staged aliases
     elif code:
-        text = implementation.review_brief(spec, worktree, sealed, bundle, feature, manifest, decisions, carried, store,
+        text = implementation.review_brief(spec, worktree, shown, bundle, feature, manifest, decisions, carried, store,
                                            repo, snapshot)
     else:
         text = _brief(spec, worktree, sealed, carried, bundle, decisions, own, inherited)
+    if inputs:
+        text += read_section(inputs)
     brief = _write_brief(worktree, brief_ref, text)
     contract_files = [] if code else report.contract_files
     assignment_id = coordinator.create_assignment(owner, AssignmentInput(
@@ -566,6 +616,8 @@ def review_prepare(repo, store, owner, spec: ReviewPrepare) -> dict:
              "contributor_assignment_ids": [row["id"] for row in contributors],
              "contributor_source_ids": sorted(json.loads(row["return_json"])["source_id"] for row in contributors),
              "lenses": list(spec.lenses), "brief_sha256": brief["digest"], "carried": carried, **client_binding(spec)}
+    if inputs:   # Copilot reviewer design V2: what the read launch stages, and which gate qualifies it
+        value.update(read_inputs=inputs, read_profile=read_profile)
     if not code:   # a planning review binding seals the contract it was prepared against
         value.update(fingerprint_sha256=report.fingerprint_sha256, contract=report.contract,
                      compat_decision_id=spec.compat_decision_id)

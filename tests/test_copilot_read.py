@@ -40,7 +40,8 @@ offered = json.loads(os.environ.get("FAKE_READ_OFFER", '["view", "grep", "glob"]
 emit("session.usage_checkpoint", {"promptCacheBreakState": [{"models": {"m": {"tools": [{"name": n} for n in offered]}}}]})
 for index, (tool, path) in enumerate(json.loads(os.environ.get("FAKE_READ_VIEWS", "[]"))):
     target = path if os.path.isabs(path) else str(cwd / path)
-    emit("tool.execution_start", {"toolCallId": "c%d" % index, "toolName": tool, "arguments": {"path": target}})
+    arguments = {"pattern": ".", "paths": target} if tool == "grep" else {"path": target}   # as 1.0.91 names them
+    emit("tool.execution_start", {"toolCallId": "c%d" % index, "toolName": tool, "arguments": arguments})
     content = pathlib.Path(target).read_text() if os.path.isfile(target) else ""
     emit("tool.execution_complete", {"toolCallId": "c%d" % index, "success": True, "result": {"content": content}})
 for kind, data in json.loads(os.environ.get("FAKE_READ_EXTRA", "[]")):
@@ -54,8 +55,8 @@ READS = json.dumps([["view", "question.json"], ["view", "mandate.json"]])
 
 
 class RoleTests(unittest.TestCase):
-    """V1 in the pipeline: a Copilot judgment needs mode read and boundary bwrap; the reviewer's read mode is not
-    implemented yet."""
+    """V1 in the pipeline: a Copilot judgment or reviewer needs mode read and boundary bwrap; a planning review's read
+    mode is not implemented yet."""
 
     def filled(self, worker=None, judgment=None, reviewer=None):
         from coordinator_core import drive_epic
@@ -75,10 +76,41 @@ class RoleTests(unittest.TestCase):
             with self.subTest(extra=extra), self.assertRaises(DomainError) as caught:
                 self.filled(judgment=extra)
             self.assertEqual(code, caught.exception.code)
-        for role, code in (("reviewer", "UNSUPPORTED_STEP"), ("worker", "INVALID_INPUT")):
-            with self.subTest(role=role), self.assertRaises(DomainError) as caught:
-                self.filled(**{role: copilot})
-            self.assertEqual(code, caught.exception.code)
+        self.assertEqual("read", self.filled(reviewer=copilot)["roles"]["reviewer"]["mode"])   # spec and code reviews
+        with self.assertRaises(DomainError) as caught:
+            self.filled(worker=copilot)
+        self.assertEqual("INVALID_INPUT", caught.exception.code)
+
+    def test_a_read_mode_reviewer_needs_its_review_profiles_qualified_at_the_start(self):
+        from coordinator_core import drive_pipeline
+        copilot = {"client": "copilot", "model": "claude-sonnet-5", "mode": "read", "boundary": "bwrap"}
+        pipeline = self.filled(reviewer=copilot)
+        self.assertEqual(["code-review", "spec-review"], drive_pipeline.read_review_profiles(pipeline))
+        self.assertEqual([], drive_pipeline.read_review_profiles(self.filled()))
+        with patch.object(clients, "preflight", return_value=("copilot", "GitHub Copilot CLI 9.9.9.")), \
+             patch.dict(clients.READ_QUALIFIED, {"9.9.9": {"code-review": clients.READ_CONTRACT}}, clear=True):
+            with self.assertRaises(DomainError) as caught:
+                drive_pipeline.check_read_reviews(pipeline)
+            self.assertIn("spec-review", caught.exception.message)
+
+    def test_a_planning_review_in_read_mode_is_refused(self):
+        from coordinator_core import drive_pipeline
+        value = {"kind": "drive-pipeline", "format": 1, "feature_id": "0" * 32, "mandate_revision": 1,
+                 "roles": {"worker": {"client": "codex-cli", "model": "m", "timeout": 30},
+                           "reviewer": {"client": "codex-cli", "model": "m", "timeout": 30}},
+                 "budgets": {"max_updates": 2, "max_judgments": 0},
+                 "steps": [{"id": "compat", "kind": "compat"},
+                           {"id": "prd", "kind": "author", "skill": "bmad-prd", "slug": "s", "author_id": "a",
+                            "inputs": {"docs/input.md": "driving-brief"}},
+                           {"id": "b", "kind": "bundle", "of": "prd"},
+                           {"id": "r", "kind": "review", "of": "b", "reviewer_id": "rev"}]}
+        drive_pipeline.validate(value)
+        value["roles"]["reviewer"] = {"client": "copilot", "model": "m", "timeout": 30, "mode": "read",
+                                      "boundary": "bwrap"}
+        with self.assertRaises(DomainError) as caught:
+            drive_pipeline.validate(value)
+        self.assertEqual("UNSUPPORTED_STEP", caught.exception.code)
+        self.assertIn("planning review", caught.exception.message)
 
 
 @unittest.skipIf(REASON and os.environ.get("COORDINATOR_REQUIRE_BWRAP") != "1", f"bwrap unusable: {REASON}")
@@ -112,7 +144,7 @@ class ReadModeTests(unittest.TestCase):
             (cwd / name).write_text(text)
         envelope = {"kind": "coordinator-judgment-request", "brief": "Brief."}
         with patch.dict(os.environ, {**self.env, **env}), \
-             patch.dict(clients.READ_QUALIFIED, {"9.9.9": clients.READ_CONTRACT} if qualified else {}, clear=True):
+             patch.dict(clients.READ_QUALIFIED, {"9.9.9": {"judgment": clients.READ_CONTRACT}} if qualified else {}, clear=True):
             return root, clients.run_isolated("copilot", self.target, root, cwd, root / "receipts", envelope, SCHEMA,
                                               "fake-model", 30, boundary_kind=boundary_kind, mode="read",
                                               required_reads=required)
@@ -130,7 +162,8 @@ class ReadModeTests(unittest.TestCase):
         self.assertEqual((["glob", "grep", "view"], "passed"), (facts["offered_tools"], facts["tool_check"]))
 
     def test_a_qualified_version_is_observed(self):
-        root, result = self.isolated(qualified=True, FAKE_READ_VIEWS=READS)
+        root, result = self.isolated(qualified=True, FAKE_READ_VIEWS=json.dumps([*json.loads(READS),
+                                                                                ["grep", "question.json"]]))
         self.assertEqual(("observed", []), (result.state, result.needs))
         self.assertEqual(b'{"answer": "yes"}', (root / "receipts" / "last.json").read_bytes())
 

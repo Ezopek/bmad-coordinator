@@ -1,6 +1,6 @@
 # Copilot as reviewer and judge: read-only tools in a staged input copy
 
-Status: approved 2026-10-22 as revision 6 (operator: "wydaje mi się ok" on revision 1 before asking for an independent review, then "Nie no to leć z tym" on §9's order of work: the boundary first, then this design on top of it). Revision 6 rests on the [launch boundary](launch-boundary-design.md), implemented and checked live the same days, which now carries the containment that revisions 2 to 5 had to argue from Copilot's own tool permissions. Revisions 1 to 5 came out of four rounds of independent review (Codex, read-only; every claim checked against the code and the installed client; project history, 2026-10-22-issues); §8 maps every finding to its decision. **The judgment slice is implemented** (2026-10-23): V1, V3 to V8 for the `judgment` role, with the parser contract `copilot-read-1` and 1.0.91 qualified for the judgment profile (P3, P4, P6; project history, 2026-10-23-copilot-read/qualification-report). The reviewer's read mode (V2's per-profile staging, P1, P2, P5) is not implemented, and a reviewer role in read mode is refused.
+Status: approved 2026-10-22 as revision 6 (operator: "wydaje mi się ok" on revision 1 before asking for an independent review, then "Nie no to leć z tym" on §9's order of work: the boundary first, then this design on top of it). Revision 6 rests on the [launch boundary](launch-boundary-design.md), implemented and checked live the same days, which now carries the containment that revisions 2 to 5 had to argue from Copilot's own tool permissions. Revisions 1 to 5 came out of four rounds of independent review (Codex, read-only; every claim checked against the code and the installed client; project history, 2026-10-22-issues); §8 maps every finding to its decision. **The judgment slice is implemented** (2026-10-23): V1, V3 to V8 for the `judgment` role, with the parser contract `copilot-read-1` and 1.0.91 qualified for the judgment profile (P3, P4, P6; project history, 2026-10-23-copilot-read/qualification-report). **The reviewer slice is implemented** (2026-10-23, §10) for spec and code reviews, **but not qualified**: on 1.0.91 every live review found its seeded defect, while three of the four answers the coordinator could check broke the JSON contract. `READ_QUALIFIED` therefore holds the judgment only, and a read-mode reviewer is refused at a start. The planning review's read mode (V2's planning row, P5) is not implemented.
 
 ## 1. Problem
 
@@ -168,3 +168,31 @@ Round 4 (revision 4) and where each finding went in revision 5 (not reviewed aga
 ## 9. Order of work (decided)
 
 Round 4 recommended qualifying one OS-level launch boundary first and letting it carry the containment half of this design. The operator chose that order ("Nie no to leć z tym", 2026-10-22). The [launch boundary](launch-boundary-design.md) was implemented and checked live before revision 6, which removed from this design the reliance on Copilot's own path checks (V5's former confinement bullet, P3's denial requirement) and most of §6's store-mutation audit. What remains is the evidence layer: V2's input binding, V5's stream and coverage rules, V6's answer selection and validation, independence, and receipt anchoring and replay.
+
+## 10. The reviewer slice: implementation rulings and qualification (2026-10-23)
+
+The operator asked for the spec and code reviews first and allowed eight more premium requests for their qualification. The planning review stays out (`UNSUPPORTED_STEP` at bind and at prepare).
+
+Rulings made while implementing, each a narrower or simpler reading of V2 to V8:
+
+- **The staged copy lives in the run directory** (`RUN/read-cwd`), not under a root outside the common directory (V3). The read mode exists only inside the launch boundary, which shows the client nothing of the project but that directory and the run's own. Keeping the copy with the receipts means a crash leaves no copy of project bytes outside the store.
+- **The brief is not staged.** It travels in the envelope, as every worker's does; a `brief.md` beside the inputs would be a second copy with nothing to gain.
+- **The run goes through the ordinary assignment.** A read review is a bound read-only review assignment whose binding carries `mode`, `read_inputs` and `read_profile`. `worker.run_assignment` launches it with the isolated mounts and the final-message return, and its receipts are the ordinary ones, so `review record`, `inspect` and `reconcile` work unchanged. The reservation accepts a read-mode binding for a client with a read mode.
+- **`bundle_read` is the coordinator's.** The model's schema drops it (V6). The coordinator adds it to the checked return from the observed full reads, every required input checked against its bound digest, so the profile check and the review record are those of every review. A required input not read in full refuses the return.
+- **A full read is kept once observed.** The launch receipt carries the bound digests, so a later partial `view` of the same file does not undo a full one.
+- **Qualification is per profile.** `READ_QUALIFIED` maps a version to its qualified profiles (`judgment`, `spec-review`, `code-review`). A drive or epic start whose read-mode reviewer lacks one of the review profiles its pipeline uses is refused before anything is bound.
+- **A qualification review is never anchored.** Its return receipt is sealed after every check, but it is neither anchored nor recorded, and replay refuses a receipt marked as a qualification run.
+
+The qualification, through the production entries on test-fixture bundles with one seeded defect each, Copilot CLI 1.0.91, model `claude-sonnet-5` (project history, 2026-10-23-copilot-read/review-qualification-report):
+
+| Run | Outcome |
+| --- | --- |
+| P1 spec review, attempt 1 | `unknown`: `grep` names its target `paths`, which the contract did not know. The contract now takes `paths`, under the same staged-path rule. |
+| P2 code review, attempt 1 | Every check passed. The seeded defect was found as a critical `acceptance` finding, and replay agreed. |
+| P1 spec review, attempt 2 | `unknown`; the scratch script lost the evidence. |
+| P1 spec review, attempt 3 | `unknown`: a sentence before the JSON block (V6). The defect was found. |
+| P1 spec review, attempt 4 | `unknown`: every finding lacked `trigger_condition`. The defect was found. The envelope's and brief's final-message rule had been tightened before this attempt. |
+| P2 code review, attempt 2 | `unknown`: every finding repeated `lens`, which the one-reading rule refuses. The defect was found. |
+
+Six requests were spent. The coordinator's side held: every refusal was fail-closed and named its cause, nothing outside the staged inputs was read, and replay agreed. The model's free-form return is the weak part, as §7 item 1 expected. No review profile is qualified. Ways to raise the return's reliability are a decision for the operator: a bounded repair round that resumes the session once with the exact validation error, accepting one fenced JSON block with prose around it, accepting a repeated key whose values are equal, or another model.
+

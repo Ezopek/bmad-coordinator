@@ -1,0 +1,203 @@
+"""Copilot as reviewer, the read mode (Copilot reviewer design revision 6, V1 to V8): a code or spec review staged from
+the sealed bundle and the bundle's commit into the run directory, launched under the launch boundary with only view,
+grep and glob, the return from the final answer and `bundle_read` from the coordinator's observation. A fake Copilot
+emits the record shapes the 1.0.91 probe showed; the tests need a usable bwrap (COORDINATOR_REQUIRE_BWRAP=1 makes its
+absence a failure)."""
+import json
+import os
+import shutil
+import sys
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from coordinator_core import bmad_implementation as impl
+from coordinator_core import bmad_review, clients, worker
+from coordinator_core.model import DomainError
+from coordinator_core.run_receipt import read_binding
+from coordinator_core.service import binding_anchor
+from tests.test_bmad_implementation import GREET, PROJECT, SPEC_PATH, SPEC_READY, TEST, StoryCase
+from tests.test_boundary import REASON
+
+FAKE = r'''#!__PYTHON__
+import json, os, pathlib, sys
+from datetime import datetime, timezone
+args = sys.argv[1:]
+if args == ["--version"]:
+    print("GitHub Copilot CLI 9.9.9.")
+    sys.exit(0)
+def flag(name):
+    return args[args.index(name) + 1]
+assert flag("--available-tools") == "glob,grep,view", args
+assert "--allow-tool" not in args and "--add-dir" not in args, args
+envelope = json.loads(flag("-p"))
+session, cwd, home = flag("--session-id"), pathlib.Path(flag("-C")), pathlib.Path(os.environ["COPILOT_HOME"])
+state = home / "session-state" / session
+state.mkdir(parents=True)
+stamp = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+(state / "workspace.yaml").write_text("id: %s\ncwd: %s\ncreated_at: %s\n" % (session, cwd, stamp))
+(state / "events.jsonl").write_text(json.dumps({"type": "session.shutdown", "data": {"requests": {"m": 1}}}) + "\n")
+def emit(kind, data=None, **top):
+    print(json.dumps({"type": kind, "data": data or {}, **top}), flush=True)
+emit("session.mcp_servers_loaded", {"servers": [{"name": "github-mcp-server", "status": "disabled"}]})
+emit("session.usage_checkpoint", {"promptCacheBreakState": [{"models": {"m": {"tools": [
+    {"name": n} for n in ("view", "grep", "glob")]}}}]})
+views = os.environ.get("FAKE_READ_VIEWS", "*")
+paths = sorted(str(p) for p in (cwd / "inputs").rglob("*") if p.is_file()) if views == "*" else json.loads(views)
+skip = os.environ.get("FAKE_READ_SKIP", "")
+for index, path in enumerate(item for item in paths if not (skip and skip in item)):
+    emit("tool.execution_start", {"toolCallId": "c%d" % index, "toolName": "view", "arguments": {"path": path}})
+    content = pathlib.Path(path).read_text() if os.path.isfile(path) else ""
+    emit("tool.execution_complete", {"toolCallId": "c%d" % index, "success": True, "result": {"content": content}})
+answer = {**json.loads(os.environ["FAKE_READ_REVIEW"]), "assignment_id": envelope["assignment_id"],
+          "request_fingerprint": envelope["request_fingerprint"]}
+emit("assistant.message", {"content": json.dumps(answer)})
+emit("result", None, sessionId=session, exitCode=0, usage={"premiumRequests": 1})
+'''
+QUALIFIED = {"9.9.9": {"code-review": clients.READ_CONTRACT, "spec-review": clients.READ_CONTRACT}}
+
+
+@unittest.skipIf(REASON and os.environ.get("COORDINATOR_REQUIRE_BWRAP") != "1", f"bwrap unusable: {REASON}")
+class ReadReviewTests(StoryCase):
+    def setUp(self):
+        if REASON:
+            self.fail(f"COORDINATOR_REQUIRE_BWRAP=1 but bwrap is unusable: {REASON}")
+        super().setUp()
+        (self.fake_dir / "copilot").write_text(FAKE.replace("__PYTHON__", sys.executable))
+        (self.fake_dir / "copilot").chmod(0o755)
+        self.read_env = {"COPILOT_GITHUB_TOKEN": "fake-token", "COORDINATOR_BOUNDARY_PASS": "FAKE_"}
+        qualified = patch.dict(clients.READ_QUALIFIED, QUALIFIED, clear=True)
+        qualified.start()
+        self.addCleanup(qualified.stop)
+
+    def code_bundle(self):
+        assignment = impl.prepare(self.story_repo, self.store, self.owner, impl.ImplementationPrepare(
+            feature_id=self.fid, key="i1", author_id="story-worker", project=PROJECT))["assignment_id"]
+        files = [("pkg/greet.py", GREET), ("tests/test_greet.py", TEST)]
+        env = {"FAKE_WRITE": json.dumps([list(item) for item in files]), "FAKE_EXTRA": json.dumps({
+            "result": "completed", "unresolved_question": None, "notes": "did the work",
+            "verification": [{"command": "unit", "exit_code": 0, "summary": "ok"}],
+            "tasks": [{"task": "Implement `greet` in `pkg/greet.py`", "done": True}],
+            "changed_paths": [path for path, _ in files]})}
+        with patch.dict(os.environ, env):
+            self.assertEqual("completed-claim", worker.run_assignment(
+                self.story_repo, self.store, self.owner, assignment, "fake-model", 5).state)
+        commit = impl.commit_attempt(self.story_repo, self.store, self.owner, self.feature(), assignment, PROJECT)
+        impl.verify_attempt(self.story_repo, self.store, self.owner, self.feature(), assignment, commit, PROJECT)
+        return impl.bundle_for_commit(self.story_repo, self.store, self.owner, self.fid, assignment)
+
+    def prepare(self, bundle, repo=None, lenses=bmad_review.CODE_LENSES, key="r1", **env):
+        with patch.dict(os.environ, {**self.read_env, **env}):
+            return bmad_review.review_prepare(repo or self.story_repo, self.store, self.owner, bmad_review.ReviewPrepare(
+                bundle["id"], "code-reviewer", key, lenses=list(lenses), client="copilot", boundary="bwrap",
+                mode="read"))
+
+    def binding(self, assignment):
+        _, bound = binding_anchor(self.store.read_snapshot()["events"], assignment)
+        return read_binding(self.base_dir, bound["evidence_ref"], bound["payload_digest"])
+
+    def review(self, assignment, repo=None, findings=(), **env):
+        binding = self.binding(assignment)
+        answer = {"result": "completed", "changed_paths": [], "checks": [], "descendants": [],
+                  "unresolved_question": None, "options": [], "affected_ids": [], "bundle_id": binding["bundle_id"],
+                  "manifest_digest": binding["manifest_digest"], "lenses_run": list(binding["lenses"]),
+                  "findings": [{"lens": binding["lenses"][0], "location": "pkg/greet.py:1", "trigger_condition": "t",
+                                "guard_snippet": "g", "potential_consequence": "c", "severity": "low", **item}
+                               for item in findings], "dispositions": []}
+        answer.update(json.loads(env.pop("FAKE_ANSWER_EXTRA", "{}")))
+        with patch.dict(os.environ, {**self.read_env, "FAKE_READ_REVIEW": json.dumps(answer), **env}):
+            return worker.run_assignment(repo or self.story_repo, self.store, self.owner, assignment, "fake-model", 30)
+
+    def test_a_code_review_in_read_mode_is_observed_recorded_and_replays_without_its_staged_copy(self):
+        prepared = self.prepare(self.code_bundle())
+        binding = self.binding(prepared["assignment_id"])
+        self.assertEqual(("read", "code-review"), (binding["mode"], binding["read_profile"]))
+        kinds = [(item["kind"], item["required"]) for item in binding["read_inputs"]]
+        self.assertEqual([("artifact", True), ("artifact", True), ("diff", True), ("spec", True)], kinds)
+        self.assertTrue(all(item["alias"].startswith("inputs/") and "/." not in item["alias"]
+                            for item in binding["read_inputs"]))
+        brief = (self.story_path / prepared["brief_ref"]).read_text()
+        self.assertIn("## Read-mode inputs (your only files)", brief)
+        self.assertNotIn("`bundle_read` holds one object", brief)
+        report = self.review(prepared["assignment_id"], findings=[{"severity": "medium"}])
+        self.assertEqual("completed-claim", report.state, report.evidence_needs)
+        launch = json.loads((Path(report.run_dir) / "launch.json").read_text())
+        self.assertEqual(("read", False, str(Path(report.run_dir) / worker.READ_CWD)),
+                         (launch["requested_mode"], launch["qualification"], launch["cwd"]))
+        modes = {item["path"]: item["mode"] for item in launch["boundary"]["mounts"]}
+        self.assertNotIn(str(self.story_path), modes)   # nothing of the project but the run's own directory
+        self.assertNotIn(str(self.story_repo.common_dir), modes)
+        recorded = bmad_review.record_bound_review(self.story_repo, self.store, self.owner, prepared["assignment_id"])
+        self.assertEqual(("observed", False), (recorded["provenance_class"], recorded["critical_open"]))
+        shutil.rmtree(Path(report.run_dir) / worker.READ_CWD)
+        self.assertEqual("completed-claim", worker.inspect_run(self.story_repo, self.store,
+                                                               prepared["assignment_id"]).state)
+
+    def test_a_spec_review_stages_the_rules_from_the_commit(self):
+        epic_fid, epic_repo = self.epic_story()
+        spec = impl.ImplementationPrepare(feature_id=epic_fid, key="s1", author_id="story-worker", kind="spec",
+                                          project={**PROJECT, "context": ["docs/house-rules.md"]})
+        from coordinator_core import bmad_spec_author
+        first = bmad_spec_author.prepare(epic_repo, self.store, self.owner, spec)["assignment_id"]
+        final = {"result": "completed", "notes": "wrote the spec", "open_questions": [], "assumptions": [],
+                 "unresolved_question": None, "options": []}
+        with patch.dict(os.environ, {"FAKE_WRITE": json.dumps([[SPEC_PATH, SPEC_READY]]),
+                                     "FAKE_EXTRA": json.dumps(final)}):
+            self.assertEqual("completed-claim", worker.run_assignment(epic_repo, self.store, self.owner, first,
+                                                                      "fake-model", 5).state)
+        feature = next(row for row in self.store.read_snapshot()["features"] if row["id"] == epic_fid)
+        impl.commit_attempt(epic_repo, self.store, self.owner, feature, first, PROJECT)
+        bundle = impl.bundle_for_commit(epic_repo, self.store, self.owner, epic_fid, first)
+        prepared = self.prepare(bundle, epic_repo, bmad_review.SPEC_LENSES)
+        inputs = self.binding(prepared["assignment_id"])["read_inputs"]
+        self.assertEqual([("artifact", SPEC_PATH, True), ("context", "docs/house-rules.md", False)],
+                         [(item["kind"], item["path"], item["required"]) for item in inputs])
+        report = self.review(prepared["assignment_id"], epic_repo, FAKE_READ_SKIP="house-rules")   # needed no rules
+        self.assertEqual("completed-claim", report.state, report.evidence_needs)
+
+    def refused(self, need, **env):
+        """A refused return fences the worktree, so each refusal is its own test."""
+        prepared = self.prepare(self.code_bundle())
+        report = self.review(prepared["assignment_id"], **env)
+        self.assertEqual("unknown", report.state)
+        self.assertIn(need, " ".join(report.evidence_needs))
+
+    def test_a_reviewed_file_not_read_in_full_is_unknown(self):
+        self.refused("did not read pkg/greet.py in full", FAKE_READ_SKIP="greet.py")
+
+    def test_an_attestation_in_the_answer_is_unknown(self):
+        self.refused("does not match", FAKE_ANSWER_EXTRA=json.dumps({"bundle_read": []}))
+
+    def test_an_unqualified_version_refuses_the_prepare_and_a_qualification_run_is_never_observed(self):
+        bundle = self.code_bundle()
+        with patch.dict(clients.READ_QUALIFIED, {"9.9.9": {"judgment": clients.READ_CONTRACT}}, clear=True):
+            with self.assertRaises(DomainError) as caught:
+                self.prepare(bundle)
+            self.assertEqual("UNSUPPORTED_CLIENT_MODE", caught.exception.code)
+            self.assertFalse(any(row["idempotency_key"] == "r1" for row in self.store.read_snapshot()["assignments"]))
+            prepared = self.prepare(bundle, COORDINATOR_QUALIFY_READ="1")
+            report = self.review(prepared["assignment_id"], COORDINATOR_QUALIFY_READ="1")
+        self.assertEqual("unknown", report.state)
+        self.assertIn("qualification run", " ".join(report.evidence_needs))
+        self.assertTrue((Path(report.run_dir) / "return.json").exists())   # every check ran, nothing was anchored
+        reconciled = worker.reconcile_run(self.story_repo, self.store, self.owner, prepared["assignment_id"])
+        self.assertEqual("unknown", reconciled.state)   # the sealed return has no anchor, so it is never bound
+        row = self.coordinator.detail("assignment", prepared["assignment_id"])
+        self.assertNotIn(row["state"], worker.RETURNED)
+
+    def test_a_planning_review_and_a_client_without_a_read_mode_are_refused(self):
+        bundle = self.code_bundle()
+        with self.assertRaises(DomainError) as caught:
+            bmad_review.review_prepare(self.story_repo, self.store, self.owner, bmad_review.ReviewPrepare(
+                bundle["id"], "code-reviewer", "r1", lenses=list(bmad_review.CODE_LENSES), client="codex-cli",
+                boundary="bwrap", mode="read"))
+        self.assertEqual("UNSUPPORTED_CLIENT_MODE", caught.exception.code)
+        with self.assertRaises(DomainError) as caught:
+            bmad_review.review_prepare(self.story_repo, self.store, self.owner, bmad_review.ReviewPrepare(
+                bundle["id"], "code-reviewer", "r1", lenses=list(bmad_review.CODE_LENSES), client="copilot",
+                mode="read"))
+        self.assertEqual("INVALID_INPUT", caught.exception.code)
+
+
+if __name__ == "__main__":
+    unittest.main()

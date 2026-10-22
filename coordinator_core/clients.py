@@ -267,8 +267,18 @@ def _locked_state(client_name: str, env: dict) -> list:
             *[boundary.Mount("ro", str(path)) for path in persistent_paths(client_name, env)]]
 
 
+CODEX_INSTRUCTIONS = ("AGENTS.override.md", "AGENTS.md")   # the operator's global instructions in CODEX_HOME
+
+
 def _codex_state(binary: str, env: dict) -> list:
-    return _node_runtime(binary, env) + _locked_state(CODEX_NAME, env)
+    """The Node runtime and CODEX_HOME locked as Claude's state is, with the operator's global instruction files shown
+    empty (finding F26): a worker follows the project's rules, not the operator's own. A symlinked one stays as
+    `ordered` leaves it, a link to a target the sandbox does not hold."""
+    directory = _state_dir(CODEX_NAME, env)[0]
+    masked = {str(directory / name) for name in CODEX_INSTRUCTIONS
+              if (directory / name).is_file() and not (directory / name).is_symlink()}
+    return _node_runtime(binary, env) + [boundary.Mount("empty", mount.path) if mount.path in masked else mount
+                                         for mount in _locked_state(CODEX_NAME, env)]
 
 
 def _claude_state(binary: str, env: dict) -> list:
@@ -726,10 +736,11 @@ READ_RECORD_TYPES = frozenset({
     # seen by the qualification runs of 2026-10-23 (project history, 2026-10-23-copilot-read): the model's reasoning
     # and the CLI's own workspace index status; neither is a tool call
     "assistant.reasoning", "assistant.reasoning_delta", "session.indexed_search"})
-# Qualified 2026-10-23 for the judgment profile (project history, 2026-10-23-copilot-read/qualification-report):
-# P3 confinement, P4 a judgment, P6 replay passed on 1.0.91. The reviewer's read mode, refused for now, needs its
-# own gates (P1, P2, P5) before it may rely on this entry.
-READ_QUALIFIED: dict[str, str] = {"1.0.91": READ_CONTRACT}
+# Per version, the profiles qualified and their parser contract. 1.0.91, the judgment, 2026-10-23 (project history,
+# 2026-10-23-copilot-read/qualification-report): P3 confinement, P4 a judgment, P6 replay. A review profile needs its
+# own gate (P1 spec review, P2 code review) before it may run unqualified-free; the planning review has none yet.
+READ_PROFILES = ("judgment", "spec-review", "code-review")
+READ_QUALIFIED: dict[str, dict[str, str]] = {"1.0.91": {"judgment": READ_CONTRACT}}
 QUALIFY_ENV = "COORDINATOR_QUALIFY_READ"
 
 
@@ -738,17 +749,19 @@ def read_version(version: str) -> str | None:
     return found.group(1) if found else None
 
 
-def read_ready(client: Client, version: str) -> bool:
+def read_ready(client: Client, version: str, profile: str = "judgment") -> bool:
     """V7: whether a `read` launch may run on this version; False means a qualification run (never observed) when
     the operator set COORDINATOR_QUALIFY_READ=1, and a refusal otherwise."""
     if not client.read_mode:
         raise DomainError("UNSUPPORTED_CLIENT_MODE", f"Worker client {client.name} has no read mode")
-    if read_version(version) in READ_QUALIFIED:
+    if profile not in READ_PROFILES:
+        raise DomainError("UNSUPPORTED_CLIENT_MODE", f"{client.name} read mode has no {profile} profile")
+    if profile in READ_QUALIFIED.get(read_version(version), {}):
         return True
     if os.environ.get(QUALIFY_ENV) == "1":
         return False
-    raise DomainError("UNSUPPORTED_CLIENT_MODE", f"{client.name} read mode is not qualified on {version!r}; a "
-                      f"qualification run needs {QUALIFY_ENV}=1 (Copilot reviewer design V7)")
+    raise DomainError("UNSUPPORTED_CLIENT_MODE", f"{client.name} read mode is not qualified for {profile} on "
+                      f"{version!r}; a qualification run needs {QUALIFY_ENV}=1 (Copilot reviewer design V7)")
 
 
 def _copilot_read_argv(spec: LaunchSpec) -> list[str]:
@@ -823,6 +836,7 @@ def _copilot_read_terminal(run_dir: Path, launch: dict) -> Terminal:
         if result.get("sessionId") != session or type(result.get("exitCode")) is not int or result["exitCode"] != 0:
             raise ValueError("the result names another session or a non-zero exit")
         offered, starts, reads, answer = None, {}, {}, None
+        bound = launch.get("read_digests") or {}   # a review's bound digests: a later partial view never undoes one
         dirs = {str(parent) for path in staged for parent in Path(path).parents if str(parent) != "."}
         for item in seen:
             data = item.get("data") if isinstance(item.get("data"), dict) else {}
@@ -839,22 +853,28 @@ def _copilot_read_terminal(run_dir: Path, launch: dict) -> Terminal:
                     raise ValueError("an MCP server was loaded")
             elif kind == "tool.execution_start":
                 name, arguments = data.get("toolName"), data.get("arguments")
-                path = arguments.get("path") if isinstance(arguments, dict) else None
-                if name not in READ_TOOLS or not isinstance(path, str) or not path:
+                arguments = arguments if isinstance(arguments, dict) else {}
+                # grep names its targets `paths` (one or several), as the 2026-10-23 review qualification showed
+                raw = arguments.get("paths") if name == "grep" and "path" not in arguments else arguments.get("path")
+                targets = [raw] if isinstance(raw, str) else raw if isinstance(raw, list) else []
+                if name not in READ_TOOLS or not targets or any(not isinstance(item, str) or not item
+                                                                for item in targets):
                     raise ValueError(f"a tool call outside the read set or without a path: {name}")
-                full = Path(os.path.normpath(path if os.path.isabs(path) else cwd / path))
-                relative = full.relative_to(cwd).as_posix() if full.is_relative_to(cwd) else None
-                if relative is None or (relative not in staged and relative not in dirs and
-                                        not (relative == "." and name == "view")):   # a listing of the cwd itself
-                    raise ValueError(f"a tool call reads outside the staged inputs: {path}")
-                starts[data.get("toolCallId")] = (name, relative, arguments)
+                for path in targets:
+                    full = Path(os.path.normpath(path if os.path.isabs(path) else cwd / path))
+                    relative = full.relative_to(cwd).as_posix() if full.is_relative_to(cwd) else None
+                    if relative is None or (relative not in staged and relative not in dirs and
+                                            not (relative == "." and name == "view")):   # a listing of the cwd
+                        raise ValueError(f"a tool call reads outside the staged inputs: {path}")
+                starts[data.get("toolCallId")] = (name, relative if len(targets) == 1 else None, arguments)
             elif kind == "tool.execution_complete":
                 call = starts.get(data.get("toolCallId"))
                 if call is None:
                     raise ValueError("a tool completion answers no start")
                 content = (data.get("result") or {}).get("content") if isinstance(data.get("result"), dict) else None
                 if call[0] == "view" and call[1] in staged and data.get("success") is True and isinstance(content, str):
-                    reads[call[1]] = hashlib.sha256(content.encode("utf-8")).hexdigest()
+                    if not (call[1] in bound and reads.get(call[1]) == bound[call[1]]):   # a full read is kept
+                        reads[call[1]] = hashlib.sha256(content.encode("utf-8")).hexdigest()
             elif kind == "assistant.message":
                 if data.get("toolRequests"):
                     continue

@@ -305,6 +305,7 @@ def start(repo, feature_id: str, value: dict, token_path: Path, bounds: RunBound
         raise DomainError("INVALID_INPUT", "Pipeline is bound to another feature")
     _bounds_check(pipeline, bounds)
     root = _judgment_root(repo, pipeline, judgment_root)
+    drive_pipeline.check_read_reviews(pipeline)   # Copilot reviewer design V8: nothing bound on a refusal
     drive_pipeline.check_bindable(store.read_snapshot(), pipeline)
     fd = acquire_lock(repo, exclusive=True)
     try:

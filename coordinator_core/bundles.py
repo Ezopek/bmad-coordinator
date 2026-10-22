@@ -2,11 +2,15 @@
 
 import hashlib
 import json
+import os
 import shutil
+import stat
+import subprocess
 import tempfile
 from pathlib import Path
 
 from .model import DomainError
+from .repo import GIT_SAFE
 from .service import _files, _json, _safe_feature_paths
 
 
@@ -129,3 +133,53 @@ def source_state(worktree: Path, manifest: dict) -> str:
         return "current"
     except (OSError, DomainError, KeyError, TypeError):
         return "unknown"
+
+
+# Copilot reviewer design V2: a read-mode launch's staged input copy -------------------------------------------------
+
+INSTRUCTION_NAMES = frozenset({"agents.md", "claude.md", "gemini.md", "copilot-instructions.md"})
+
+
+def read_alias(kind: str, index: int, path: str) -> str:
+    """The inert alias `inputs/<kind>/<NNNN>-<name>`: the basename without a leading dot, and an instruction file's
+    name replaced, so no staged path is a location or a file name a client discovers and loads."""
+    name = Path(path).name.lstrip(".") or "file"
+    return f"inputs/{kind}/{index:04d}-{'file.md' if name.lower() in INSTRUCTION_NAMES else name}"
+
+
+def input_bytes(worktree: Path, source: dict) -> bytes:
+    """One input's bytes: a regular file never followed through a link (`file`), or a regular blob at a commit
+    (`commit`, `path`); anything else refuses the launch."""
+    try:
+        if "file" in source:
+            fd = os.open(source["file"], os.O_RDONLY | os.O_NOFOLLOW)
+            with os.fdopen(fd, "rb") as stream:
+                if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                    raise OSError("not a regular file")
+                return stream.read()
+        git = ["git", *GIT_SAFE, "-C", str(worktree)]
+        listed = subprocess.run([*git, "ls-tree", "-z", source["commit"], "--", source["path"]], capture_output=True,
+                                timeout=60, stdin=subprocess.DEVNULL, check=True).stdout.decode().rstrip("\0")
+        mode, kind, blob = listed.split("\t", 1)[0].split()
+        if kind != "blob" or mode not in ("100644", "100755"):
+            raise OSError("not a regular file at the commit")
+        return subprocess.run([*git, "cat-file", "blob", blob], capture_output=True, timeout=60,
+                              stdin=subprocess.DEVNULL, check=True).stdout
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
+        raise DomainError("UNKNOWN_EVIDENCE", f"Read-mode input {source.get('path') or source.get('file')} cannot be "
+                          f"read: {exc}") from exc
+
+
+def stage_inputs(worktree: Path, cwd: Path, inputs: list[dict]) -> list[str]:
+    """Each input read once, checked against its bound digest, and that same buffer written read-only under its
+    alias; a mismatch refuses the launch (UNKNOWN_EVIDENCE). The staged aliases, sorted."""
+    for item in inputs:
+        data = input_bytes(worktree, item["source"])
+        if hashlib.sha256(data).hexdigest() != item["digest"]:
+            raise DomainError("UNKNOWN_EVIDENCE", f"Read-mode input {item['path']} differs from its bound digest")
+        target = cwd / item["alias"]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with open(target, "xb") as stream:
+            stream.write(data)
+        target.chmod(0o444)
+    return sorted(item["alias"] for item in inputs)

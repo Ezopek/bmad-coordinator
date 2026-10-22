@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import boundary, clients, profiles
+from . import boundary, bundles, clients, profiles
 from .installation import doctor
 from .model import DomainError, LaunchEvidence, OwnerRef, ReturnEvidence
 from .repo import GIT_SAFE, RepoIdentity, resolve_repo
@@ -80,8 +80,16 @@ def _check_checkout(repo: RepoIdentity, feature: dict) -> None:
         raise DomainError("STALE_INPUT", "Installed package or committed base is not ready: " + "; ".join(report.reasons))
 
 
-def _schema(profile=profiles.GENERIC) -> dict:
-    return {"type": "object", "additionalProperties": False, "required": sorted(FIELDS | set(profile.extra)),
+READ_CWD = "read-cwd"   # Copilot reviewer design V3: the staged copy inside the run directory
+READ_DROPPED = frozenset({"bundle_read"})   # Copilot reviewer design V6: a read-mode reviewer's reads are observed
+
+
+def _extra(profile, read: bool) -> dict:
+    return {key: value for key, value in profile.extra.items() if not (read and key in READ_DROPPED)}
+
+
+def _schema(profile=profiles.GENERIC, read: bool = False) -> dict:
+    return {"type": "object", "additionalProperties": False, "required": sorted(FIELDS | set(_extra(profile, read))),
             "properties": {
         "assignment_id": {"type": "string"}, "request_fingerprint": {"type": "string"},
         "result": {"enum": ["completed", "needs-decision", "blocked"]},
@@ -91,12 +99,12 @@ def _schema(profile=profiles.GENERIC) -> dict:
         "unresolved_question": {"type": ["string", "null"]},
         "options": {"type": "array", "items": {"type": "string"}},
         "affected_ids": {"type": "array", "items": {"type": "string"}},
-        **profile.extra,
+        **_extra(profile, read),
     }}
 
 
-def _final(value, assignment, profile=profiles.GENERIC):
-    if not isinstance(value, dict) or set(value) != FIELDS | set(profile.extra) or \
+def _final(value, assignment, profile=profiles.GENERIC, read: bool = False):
+    if not isinstance(value, dict) or set(value) != FIELDS | set(_extra(profile, read)) or \
        value.get("assignment_id") != assignment["id"] or \
        value.get("request_fingerprint") != assignment["request_fingerprint"] or \
        value.get("result") not in ("completed", "needs-decision", "blocked") or \
@@ -116,6 +124,27 @@ def _stop_final(assignment, stop: dict) -> dict:
 
 
 _stop_group = clients.stop_group
+
+
+def _observed_reads(final: dict, binding: dict, reads: dict) -> dict:
+    """Copilot reviewer design V5, V6: a read-mode review's `bundle_read`, observed by the coordinator: every input the
+    binding marks required read in full (a successful view returned its bound bytes), each sealed file by its manifest
+    path and its digest. One not read in full refuses the return, as a `bundle_read` mismatch does."""
+    if final["result"] != "completed":   # a blocked or undecided return is never a review, so nothing is attested
+        return {**final, "bundle_read": []}
+    for item in binding["read_inputs"]:
+        if item["required"] and reads.get(item["alias"]) != item["digest"]:
+            raise DomainError("UNKNOWN_EVIDENCE", f"The read-mode reviewer did not read {item['path']} in full")
+    return {**final, "bundle_read": [{"path": item["path"], "sha256": item["digest"]}
+                                     for item in binding["sealed_files"]]}
+
+
+READ_RETURN = ("Your cwd is `{cwd}` and holds only the staged inputs the brief lists under `inputs/`. Use only the "
+               "view, grep and glob tools, on paths under `{cwd}/inputs/`: never the cwd itself, its .git or any "
+               "other path; any other path voids the review. View every file marked `read in full` whole, once "
+               "(pass forceReadLargeFiles for a large file). You have no tool to write: your final message is your "
+               "return, exactly one JSON object. It starts with `{{` and ends with `}}`: no sentence, heading or note "
+               "before or after it, or the review is void.")
 
 
 # `affected_ids` as Coordinator.record_return enforces it, quoting its refusal; every envelope and every BMAD brief
@@ -219,7 +248,7 @@ def _story(profile_name) -> bool:
 
 
 def _envelope(assignment, feature, inventory_digest, model, timeout_seconds, return_path=None, schema=None, forms=(),
-              hint=None, profile_name=None):
+              hint=None, profile_name=None, read_cwd=None):
     from .bmad_implementation import SPEC_AUTHOR   # lazy: the story profile module imports this one
     instructions = INSTRUCTIONS if not _story(profile_name) else \
         SPEC_INSTRUCTIONS if profile_name == SPEC_AUTHOR else STORY_INSTRUCTIONS
@@ -245,6 +274,9 @@ def _envelope(assignment, feature, inventory_digest, model, timeout_seconds, ret
             schema, {"assignment_id": assignment["id"], "request_fingerprint": assignment["request_fingerprint"]})
         if hint:  # the profile's own return guidance (planning: the workflow_json skeleton)
             value["instructions"] += " " + hint
+    if read_cwd is not None:   # Copilot reviewer design V4, V6: the read mode's rules and its final-message return
+        value["instructions"] = instructions + " " + READ_RETURN.format(cwd=read_cwd) + " " + return_schema_text(
+            schema, {"assignment_id": assignment["id"], "request_fingerprint": assignment["request_fingerprint"]})
     if forms:  # script-launcher clients with bound commands only
         value["instructions"] += " " + SCRIPT_LAUNCHER.format(clients.LAUNCHER_NAME, ", ".join(
             f"`{clients.LAUNCHER_NAME} {' '.join(form)} …`" for form in forms))
@@ -382,6 +414,10 @@ def _validated_receipt(repo, store, assignment, directory, historical=False):
         raise DomainError("UNKNOWN_EVIDENCE", "Stored launch reference differs")
     client = _recorded_client(launch, value, binding, events, assignment["id"])
     _check_boundary(launch, binding)
+    read = launch.get("requested_mode") == "read"   # Copilot reviewer design V1, V6
+    if read != (binding is not None and binding.get("mode") == "read") or launch.get("qualification") is True:
+        raise DomainError("UNKNOWN_EVIDENCE", "The receipt's read mode differs from its binding, or it is a "
+                          "qualification run, which is never observed")
     if "client" in launch:  # receipts written since the client registry also need a clean D16 record
         _clean_integrity(directory)
     if (launch.get("profile"), launch.get("binding_sha256"), value.get("profile")) != \
@@ -403,7 +439,7 @@ def _validated_receipt(repo, store, assignment, directory, historical=False):
     if client.observation_name is not None and \
        _sha256_file(directory / client.observation_name) != value.get("observation_sha256"):
         raise DomainError("UNKNOWN_EVIDENCE", "Sealed client observation differs from the receipt")
-    if client.return_source == "worker-file" and \
+    if client.return_source == "worker-file" and not read and \
        clients.worker_return_sha256(directory) != value.get("worker_return_sha256"):
         raise DomainError("UNKNOWN_EVIDENCE", "Retained worker return differs from the receipt")
     if "script_launcher" in launch:  # the sealed post-run launcher check (fix round 2, I2)
@@ -422,7 +458,7 @@ def _validated_receipt(repo, store, assignment, directory, historical=False):
        (value["exit_code"] != 0 and not stopped):
         raise DomainError("UNKNOWN_EVIDENCE", "Terminal receipt no longer matches raw process output")
     if not clients.facts_agree(value.get("client_facts"), clients.client_facts(
-            client, assignment["permission_mode"], terminal, web=launch.get("web") is True)):
+            client, "read" if read else assignment["permission_mode"], terminal, web=launch.get("web") is True)):
         raise DomainError("UNKNOWN_EVIDENCE", "Client facts differ from the retained client output")
     if stopped:   # design D25: no final message, no profile payload; the stop and its fixed fields are re-derived
         expected = _stop_final(assignment, terminal.stop)
@@ -432,7 +468,9 @@ def _validated_receipt(repo, store, assignment, directory, historical=False):
                ("checks", "descendants", "unresolved_question", "options", "affected_ids")):
             raise DomainError("UNKNOWN_EVIDENCE", "Stop receipt differs from the retained client output")
         return event
-    final = _final(json.loads(last), assignment, profile)
+    final = _final(json.loads(last), assignment, profile, read)
+    if read:
+        final = _observed_reads(final, binding, terminal.facts.get("reads", {}))
     if any(final[key] != value.get(key) for key in
            ("result", "checks", "descendants", "unresolved_question", "options", "affected_ids")) or \
        final["changed_paths"] != value.get("claimed_paths"):
@@ -537,35 +575,47 @@ def run_assignment(repo: RepoIdentity, store: Store, owner: OwnerRef, assignment
         if profile_name else None
     chosen = _resolve_client(client, binding)
     kind = _resolve_boundary(boundary_kind, binding)
+    read = bool(binding) and binding.get("mode") == "read"   # Copilot reviewer design revision 6
     commands = clients.bound_commands(binding)
     if max_turns is not None and chosen.max_turns_default is None:
         raise DomainError("INVALID_INPUT", f"Worker client {chosen.name} does not take max turns")
-    if mode == "read-only" and not chosen.write_free_readonly:
+    if read and (not chosen.read_mode or kind is None or mode != "read-only"):
+        raise DomainError("UNSUPPORTED_CLIENT_MODE", f"Worker client {chosen.name} has no read mode outside the "
+                          "launch boundary")
+    if mode == "read-only" and not chosen.write_free_readonly and not read:
         raise DomainError("UNSUPPORTED_CLIENT_MODE", f"Worker client {chosen.name} has no write-free read-only mode")
     name = run_name(assignment_id, assignment["request_fingerprint"])
     root = run_root(repo)
     directory = root / name
+    read_cwd = directory / READ_CWD if read else None   # V3: the staged copy, kept with the run's receipts
     return_path = str(directory / clients.WORKER_RETURN / "return.json") \
-        if chosen.return_source == "worker-file" else None
+        if chosen.return_source == "worker-file" and not read else None
     # A bound author of a script-launcher client gets RUN/worker-tools/bmad-script; malformed commands, or an
     # interpreter or uv that cannot be bound (including an interpreter under the worktree or the common directory),
     # are refused here, before the reservation.
     launcher = clients.launcher_bytes(commands, clients.launcher_tools((repo.worktree, repo.common_dir)),
                                       str(repo.worktree)) if chosen.script_launcher and commands else None
     forms = clients.launcher_forms(commands) if launcher else ()
-    schema = _schema(profile)  # one object: return.schema.json, the client argv and a worker-file envelope's listing
+    schema = _schema(profile, read)  # one object: return.schema.json, the client argv and an envelope's listing
     hint = profile.hint(binding) if return_path and profile.hint and binding else None
     if chosen.max_envelope_bytes is not None and len(canonical(_envelope(
-            assignment, feature, "0" * 64, model, timeout_seconds, return_path, schema, forms, hint, profile_name))) > \
-            chosen.max_envelope_bytes:
+            assignment, feature, "0" * 64, model, timeout_seconds, return_path, schema, forms, hint, profile_name,
+            str(read_cwd) if read else None))) > chosen.max_envelope_bytes:
         raise DomainError("INVALID_INPUT", "Envelope exceeds the worker client's envelope limit")
     if root.is_symlink() or (root.exists() and not root.is_dir()):
         raise DomainError("UNSAFE_PATH", "Run directory is unsafe")
     if os.path.lexists(directory):
         raise DomainError("BLOCKED_EVIDENCE", "Run sidecar already exists; no relaunch")
     binary, version = clients.preflight(chosen)  # a missing or broken binary costs no attempt (D5)
-    plan = None
-    if kind is not None:   # launch-boundary L4, L7: checked before the reservation, so a refusal costs nothing
+    plan, qualified = None, True
+    if read:   # V7, V8: the profile's qualification and every staged input, before the reservation
+        qualified = clients.read_ready(chosen, version, binding["read_profile"])
+        for item in binding["read_inputs"]:
+            if hashlib.sha256(bundles.input_bytes(repo.worktree, item["source"])).hexdigest() != item["digest"]:
+                raise DomainError("UNKNOWN_EVIDENCE", f"Read-mode input {item['path']} differs from its bound digest")
+        plan = clients.plan_boundary(kind, chosen, binary, boundary.project_mounts("isolated", directory, read_cwd),
+                                     clients.worktree_protected(repo))
+    elif kind is not None:   # launch-boundary L4, L7: checked before the reservation, so a refusal costs nothing
         protected = clients.worktree_protected(repo)
         sealed = (binding["sealed_root"],) if binding and binding.get("sealed_root") else ()
         declared = ((binding or {}).get("project") or {}).get("boundary") or {}   # launch-boundary L4
@@ -593,20 +643,29 @@ def run_assignment(repo: RepoIdentity, store: Store, owner: OwnerRef, assignment
         raise DomainError("BLOCKED_EVIDENCE", "Run sidecar already exists; no relaunch") from exc
     for subdir in chosen.run_subdirs:
         (directory / subdir).mkdir(mode=0o700)
+    staged, cwd_before = [], None
+    if read:   # V2, V3: each input checked again and written once, in a Git-initialised directory of its own
+        read_cwd.mkdir(mode=0o700)
+        subprocess.run(["git", *GIT_SAFE, "init", "-q", str(read_cwd)], check=True, capture_output=True, timeout=60,
+                       stdin=subprocess.DEVNULL)
+        staged = bundles.stage_inputs(repo.worktree, read_cwd, binding["read_inputs"])
+        cwd_before = inventory(read_cwd)
     if launcher is not None:
         clients.write_launcher(directory, launcher)
     envelope = canonical(_envelope(assignment, feature, hashlib.sha256(canonical(stamp_json(before))).hexdigest(),
-                                   model, timeout_seconds, return_path, schema, forms, hint, profile_name))
+                                   model, timeout_seconds, return_path, schema, forms, hint, profile_name,
+                                   str(read_cwd) if read else None))
     private_file(directory / "envelope.json", envelope)
     private_file(directory / "return.schema.json", canonical(schema))
     if chosen.return_source == "client-file":
         private_file(directory / "last.json", b"")
     session = str(uuid.uuid4()) if chosen.presets_session else None
-    spec = clients.LaunchSpec(binary, mode, repo.worktree, directory, schema, model,
-                              max_turns if max_turns is not None else chosen.max_turns_default, session,
-                              (binding["sealed_root"],) if binding and binding.get("sealed_root") else (),
+    spec = clients.LaunchSpec(binary, "read" if read else mode, read_cwd if read else repo.worktree, directory,
+                              schema, model, max_turns if max_turns is not None else chosen.max_turns_default, session,
+                              (binding["sealed_root"],) if binding and binding.get("sealed_root") and not read else (),
                               commands, web=bool(binding) and binding.get("web") is True and mode != "read-only",
-                              return_path=return_path)
+                              return_path=return_path, isolated=read)
+    cwd = read_cwd if read else repo.worktree
     argv = chosen.argv(spec)
     run_env = chosen.run_env(spec)
     facts = chosen.launch_facts(spec)  # before the spawn: Copilot's pre_spawn_at and $HOME session check
@@ -622,10 +681,10 @@ def run_assignment(repo: RepoIdentity, store: Store, owner: OwnerRef, assignment
                                 clients.persistent_state(chosen.name, clients.static_env(chosen)),
                                 repo.common_dir / "coordinator" / "quarantine" / name) if plan else None
                 spawned, record, copies = clients.boundary_launch(
-                    plan, repo.worktree, argv, clients.spawn_argv(chosen, argv, envelope)) if plan \
+                    plan, cwd, argv, clients.spawn_argv(chosen, argv, envelope)) if plan \
                     else (clients.spawn_argv(chosen, argv, envelope), None, {})
                 try:
-                    process = subprocess.Popen(spawned, cwd=repo.worktree, pass_fds=tuple(copies.values()),
+                    process = subprocess.Popen(spawned, cwd=cwd, pass_fds=tuple(copies.values()),
                                                stdin=subprocess.PIPE, stdout=output, stderr=error,
                                                start_new_session=True, umask=0o077,
                                                env={**(clients.boundary_spawn_env(plan, clients.static_env(chosen))
@@ -647,7 +706,11 @@ def run_assignment(repo: RepoIdentity, store: Store, owner: OwnerRef, assignment
                 if chosen.confinement == "os-sandbox-requested":
                     launch["requested_sandbox"] = mode
                 else:
-                    launch.update(requested_mode=mode, confinement=chosen.confinement)
+                    launch.update(requested_mode="read" if read else mode, confinement=chosen.confinement)
+                if read:   # V2, V5, V7: the staged inputs, their bound digests, the required reads, a qualification
+                    launch.update(cwd=str(read_cwd), read_paths=staged, qualification=not qualified,
+                                  read_digests={item["alias"]: item["digest"] for item in binding["read_inputs"]},
+                                  required_reads=[item["alias"] for item in binding["read_inputs"] if item["required"]])
                 if session is not None:
                     launch["session_id"] = session
                 if spec.max_turns is not None:
@@ -704,6 +767,8 @@ def run_assignment(repo: RepoIdentity, store: Store, owner: OwnerRef, assignment
                             "the coordinator ran no Git command after it"])
         try:
             after = inventory(repo.worktree)
+            if read and delta(cwd_before, inventory(read_cwd)):   # V5: nothing was written
+                raise DomainError("UNKNOWN_EVIDENCE", "The read-mode run changed its staged inputs")
             # design D25: after a non-zero exit only a client stop, read from the stream, goes on
             early = clients.exited_terminal(chosen, directory, launch) if process.returncode != 0 else None
             extras = {}
@@ -720,7 +785,7 @@ def run_assignment(repo: RepoIdentity, store: Store, owner: OwnerRef, assignment
             if terminal.stop is not None and not _story(profile.name):   # design D25: a story-profile fact only
                 raise DomainError("UNKNOWN_EVIDENCE", "the client stopped at its turn limit "
                                   f"({terminal.stop.get('num_turns')} turns) without a return")
-            if chosen.return_source == "stdout":
+            if chosen.return_source == "stdout" or read:   # V6: the read mode's return is the final answer
                 private_file(directory / "last.json", terminal.final)
             elif chosen.return_source == "worker-file":
                 private_file(directory / "last.json", clients.read_worker_return(directory))
@@ -729,13 +794,18 @@ def run_assignment(repo: RepoIdentity, store: Store, owner: OwnerRef, assignment
             if last != terminal.final:
                 raise DomainError("UNKNOWN_EVIDENCE", "Final message differs from the client terminal")
             final = _stop_final(assignment, terminal.stop) if terminal.stop is not None else \
-                _final(json.loads(last), assignment, profile)
-            facts = clients.client_facts(chosen, mode, terminal, web=spec.web)
+                _final(json.loads(last), assignment, profile, read)
+            if read:
+                final = _observed_reads(final, binding, terminal.facts.get("reads", {}))
+            facts = clients.client_facts(chosen, spec.mode, terminal, web=spec.web)
             if facts:
                 extras["client_facts"] = facts
             event = _return_evidence(repo, assignment, directory, before, after, final, terminal.thread_id,
                                      process.returncode, profile, binding,
                                      json.loads(feature["writable_paths_json"]), chosen, extras)
+            if not qualified:   # V1: a qualification run passes every check and is never anchored nor observed
+                return _report(assignment_id, "unknown", directory, [
+                    "qualification run: every check passed; never observed (Copilot reviewer design V1)"])
             observed.anchor_return(owner, assignment_id, event)
             observed.record_return(owner, assignment_id, event)
             return _report(assignment_id, STATE_OF[final["result"]], directory)

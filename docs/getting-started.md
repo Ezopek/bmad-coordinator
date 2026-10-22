@@ -131,7 +131,7 @@ Everything the quickstart made is under `$WORK`; `rm -rf "$WORK"` removes it all
           "judgment": {"client": "codex-cli", "model": "gpt-6-astra", "timeout": 600}}
 ```
 
-Copilot cannot review yet, so that role goes to Claude or Codex. It can judge in its read mode, inside the launch boundary: `{"client": "copilot", "model": "claude-sonnet-5", "timeout": 600, "mode": "read", "boundary": "bwrap"}`. It gets only `view`, `grep` and `glob`, reads the question, the mandate and the decisions in full, and answers in its final message.
+Copilot does not review yet, so that role goes to Claude or Codex: its read mode for spec and code reviews is implemented, but no Copilot CLI version is qualified for it yet: on 1.0.91 every live review found its seeded defect, but three of the four answers the coordinator could check broke the JSON contract (prose around the object, a missing field, a repeated key). It can judge in its read mode, inside the launch boundary: `{"client": "copilot", "model": "claude-sonnet-5", "timeout": 600, "mode": "read", "boundary": "bwrap"}`. It gets only `view`, `grep` and `glob`, reads the question, the mandate and the decisions in full, and answers in its final message.
 
 ## Your own repository
 

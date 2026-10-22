@@ -334,6 +334,24 @@ print(json.dumps(out))
         self.assertEqual(["600", "{}", "{}", "more"], done.stdout.split())
         self.assertEqual("{}\n", source.read_text())
 
+    def test_an_empty_mount_hides_a_file_under_a_read_write_bind_and_never_writes_it(self):
+        home = self.outside / "codex-home"
+        home.mkdir()
+        (home / "AGENTS.md").write_text("operator rules\n")
+        inner = [Mount("rw", str(home)), Mount("empty", str(home / "AGENTS.md"))]
+        copies = boundary.open_copies(inner)
+        try:
+            mounts, _ = boundary.ordered([*boundary.system_mounts(), *inner])
+            script = f"wc -c < {home}/AGENTS.md; echo more >> {home}/AGENTS.md || echo refused; echo ok > {home}/x"
+            done = subprocess.run(boundary.wrap(self.bwrap, mounts, Path("/"), ["/bin/sh", "-c", script], copies),
+                                  capture_output=True, text=True, timeout=60, pass_fds=tuple(copies.values()))
+        finally:
+            boundary.close(copies)
+        self.assertEqual(0, done.returncode, done.stderr)
+        self.assertEqual(["0", "refused"], done.stdout.split())
+        self.assertEqual("operator rules\n", (home / "AGENTS.md").read_text())
+        self.assertEqual("ok\n", (home / "x").read_text())   # the parent bind still writes
+
     def marker_alive(self, marker):
         for pid in os.listdir("/proc"):
             try:
@@ -441,6 +459,19 @@ class LaunchTests(CoreBase):
         self.assertEqual(("ro", "rw"), (modes[str(cwd)], modes[str(root / "receipts")]))
         self.assertFalse(any(path.startswith(str(self.t.path)) or path.startswith(str(self.main))
                              for path in modes), "nothing of the project is mounted")
+
+    def test_codex_global_instructions_are_empty_inside_and_kept_outside(self):
+        (self.codex_home / "AGENTS.md").write_text("operator rules\n")
+        (self.codex_home / "AGENTS.override.md").write_text("override\n")
+        (self.codex_home / "RTK.md").write_text("notes\n")
+        report = self.bounded(self.assign(), FAKE_WRITE=writes(("result.md", "r"),
+                                                               (str(self.codex_home / "AGENTS.md"), "more\n")))
+        self.assertEqual("unknown", report.state)
+        modes = {item["path"]: item["mode"] for item in
+                 json.loads((Path(report.run_dir) / "launch.json").read_text())["boundary"]["mounts"]}
+        self.assertEqual(("empty", "empty", "ro"), tuple(modes[str(self.codex_home / name)]
+                                                         for name in ("AGENTS.md", "AGENTS.override.md", "RTK.md")))
+        self.assertEqual("operator rules\n", (self.codex_home / "AGENTS.md").read_text())
 
     def test_a_persistent_client_entry_is_read_only(self):
         report = self.bounded(self.assign(), FAKE_WRITE=writes(("result.md", "r"),

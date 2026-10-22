@@ -69,6 +69,8 @@ class GoldenCodexTests(PlanningCase):
     """The capture flows of fixtures/codex-322752a/README.txt, re-run on the current code with the same fake."""
 
     def setUp(self):
+        umask = os.umask(0o022)   # the golden inventories record file modes, so the fixture's own mask is fixed
+        self.addCleanup(os.umask, umask)
         counter = itertools.count(1)
         patcher = patch("uuid.uuid4", side_effect=lambda: uuid.UUID(int=next(counter)))
         patcher.start()
@@ -329,7 +331,7 @@ class ClientTests(Harness):
         self.assertIn("The alt-stdout client does not auto-discover the skill", self.brief_of(other))
         reviewed = review.ReviewPrepare("bundle", "reviewer", "r1", self.compat)
         self.assertEqual(sha(canonical({key: value for key, value in asdict(reviewed).items()
-                                        if key not in ("client", "boundary")})),
+                                        if key not in ("client", "boundary", "mode")})),   # an unset mode, too
                          planning.spec_digest(reviewed))
         self.assertNotEqual(planning.spec_digest(reviewed), planning.spec_digest(replace(reviewed, client="alt-stdout")))
 

@@ -8,7 +8,7 @@ Status: guidance distilled on **2026-10-10** from the retained live evidence (80
 - **`claude-code`** gets `--model M`. The aliases `sonnet` and `opus` are resolved by the CLI; the result record names the model that actually ran (`claude-sonnet-5-5`, `claude-opus-5-5` in every retained run, Claude Code 2.1.289–2.1.295).
 - **`codex-cli`** gets `-m M`; the operator's `~/.codex/config.toml` default (`gpt-6-astra`, `model_reasoning_effort = "high"`) applies only to what the pipeline leaves unset, which is the reasoning effort.
 - **`copilot`** gets `--model M` with Copilot's own labels (`claude-sonnet-5` in every retained run); routing is plan-dependent and each launch is one premium request.
-- The client, not the model, decides the mode: `claude-code` and `codex-cli` have a write-free read-only mode (reviews, judgments); `copilot` is an author, and a judge only in its read mode inside the launch boundary (`"mode": "read"`, `"boundary": "bwrap"` on the `judgment` role; qualified on 1.0.91). It cannot review yet (`UNSUPPORTED_CLIENT_MODE`/`UNSUPPORTED_STEP` for `reviewer`).
+- The client, not the model, decides the mode: `claude-code` and `codex-cli` have a write-free read-only mode (reviews, judgments); `copilot` is an author, and a judge only in its read mode inside the launch boundary (`"mode": "read"`, `"boundary": "bwrap"` on the `judgment` role; qualified on 1.0.91). Its read mode for spec and code reviews is implemented, but no Copilot CLI version is qualified for it yet: on 1.0.91 every live review found its seeded defect, but three of the four answers the coordinator could check broke the JSON contract (prose around the object, a missing field, a repeated key), so a `reviewer` role in read mode is refused at the start (`UNSUPPORTED_CLIENT_MODE`), and a planning review in read mode always (`UNSUPPORTED_STEP`).
 
 ## 2. What each role needs from a model
 
@@ -47,7 +47,7 @@ Retained launches by `(client, model, mode)`; cost is the client-reported `total
 | Role | First choice | Fallback | Do not use | Timeout seen to hold |
 | --- | --- | --- | --- | --- |
 | `worker` | `claude-code` / `sonnet` | `codex-cli` / `gpt-6-astra` (slower, asks less, fewer premium or cost surprises) | `copilot` only when a premium budget is set aside (author-only) | 900 s (Claude, Copilot); 1800 s (Codex) |
-| `reviewer` | `claude-code` / `opus` | `codex-cli` / `gpt-6-astra` read-only (one sample, lighter findings) | `copilot` (no read-only mode); `sonnet` as reviewer is unmeasured | 900 s |
+| `reviewer` | `claude-code` / `opus` | `codex-cli` / `gpt-6-astra` read-only (one sample, lighter findings) | `copilot` (read mode implemented, not qualified for reviews); `sonnet` as reviewer is unmeasured | 900 s |
 | `judgment` | `claude-code` / `sonnet` | `codex-cli` / `gpt-6-astra` | `copilot` | 600 s |
 
 - **Vendor independence.** Put the author and the reviewer on different vendors when it costs nothing: the proven pair is a Codex author with an opus reviewer (run 9). Copilot's `claude-sonnet-5` with an opus reviewer is single-vendor despite the two clients.

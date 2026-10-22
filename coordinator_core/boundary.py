@@ -14,7 +14,7 @@ from .model import DomainError
 
 KIND = "bwrap"
 KINDS = (KIND,)
-MODES = ("ro", "rw", "copy", "tmpfs", "symlink")
+MODES = ("ro", "rw", "copy", "tmpfs", "symlink", "empty")
 NAMESPACES = ("--unshare-pid", "--unshare-ipc", "--unshare-uts", "--unshare-cgroup-try")
 MERGED_USR = ("bin", "lib", "lib64", "sbin")
 ENV = {"GIT_OPTIONAL_LOCKS": "0"}   # L2: a read-only Git skips its optional index refresh
@@ -24,7 +24,8 @@ MAX_LINKS = 16
 
 @dataclass(frozen=True)
 class Mount:
-    mode: str          # ro | rw | copy (a private 0600 writable copy of a file) | tmpfs | symlink
+    mode: str          # ro | rw | copy (a private 0600 writable copy of a file) | tmpfs | symlink | empty (an
+                       # existing file shown empty and read-only; the host's file is never written)
     path: str          # absolute and normalized, the same inside as outside
     target: str = ""   # symlink only: the link's target, verbatim
 
@@ -160,7 +161,7 @@ def ordered(mounts: list[Mount]) -> tuple[list[Mount], list[str]]:
     present, absent = [], []
     binds = [Path(item.path) for item in seen.values() if item.mode in ("ro", "rw")]
     for mount in seen.values():
-        if mount.mode in ("ro", "rw", "copy") and not os.path.lexists(mount.path):
+        if mount.mode in ("ro", "rw", "copy", "empty") and not os.path.lexists(mount.path):
             absent.append(mount.path)
         elif mount.mode == "symlink" and any(Path(mount.path).is_relative_to(path) for path in binds):
             continue   # the link already exists in that bind (a read-only one could not take a new one)
@@ -181,19 +182,23 @@ def wrap(bwrap: str, mounts: list[Mount], cwd: Path, command: list[str], copies:
             argv += ["--tmpfs", mount.path]
         elif mount.mode == "symlink":
             argv += ["--symlink", mount.target, mount.path]
+        elif mount.mode == "empty":   # bound over the file, so a read-write parent bind never writes it
+            argv += ["--ro-bind-data", str(copies[mount.path]), mount.path]
         else:
             argv += ["--perms", "0600", "--file", str(copies[mount.path]), mount.path]
     return argv + ["--chdir", str(cwd), "--", *command]
 
 
 def open_copies(mounts: list[Mount]) -> dict[str, int]:
-    """Read-only descriptors for the `copy` mounts, opened just before a spawn; the caller passes them with
-    `pass_fds` and closes them with `close` on every path (L3)."""
+    """Read-only descriptors for the `copy` mounts (the file) and the `empty` ones (`/dev/null`), opened just before
+    a spawn; the caller passes them with `pass_fds` and closes them with `close` on every path (L3)."""
     copies = {}
     try:
         for mount in mounts:
             if mount.mode == "copy":
                 copies[mount.path] = os.open(mount.path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            elif mount.mode == "empty":
+                copies[mount.path] = os.open(os.devnull, os.O_RDONLY | os.O_CLOEXEC)
     except OSError:
         close(copies)
         raise

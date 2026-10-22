@@ -1511,70 +1511,47 @@ class SpecAuthorTests(StoryCase):
         self.assertEqual("unknown", report.state)
         self.assertIn("open_questions", " ".join(report.evidence_needs))
 
-    def test_a_return_may_quote_a_question_without_its_code_marks(self):
-        # design §7 F18 (live hook 20): the file says `name`, the return says name; code quotes and the run of spaces
-        # aside it is the file's entry. Other words are another question and the return stays unknown.
+    def test_a_return_that_rewords_an_entry_still_names_it_and_the_record_keeps_the_file(self):
+        # design §7 F18, F21, F22 and F25: the return drops code marks, ends with a full stop, or loses a word; the
+        # ids and the option counts agree, so it names the file's entry, and the payload carries the file's words.
+        file_question = "Strip  whitespace from the `name`"
+        spec_text = SPEC_WITH_QUESTION.replace("Strip whitespace from the name?", file_question).replace(
+            "keep (the name is used exactly as given)", "keep a name that the caller gave (the name is used as given)")
+        reworded = [{"id": "Q1", "question": "Strip whitespace from the name.",
+                     "options": [{"label": "strip", "consequence": "callers get a trimmed name"},
+                                 {"label": "keep a name the caller gave", "consequence": "used as given"}],
+                     "recommendation": "keep"}]
         assignment = self.prep_spec()["assignment_id"]
-        spec_text = SPEC_WITH_QUESTION.replace("Strip whitespace from the name?", "Strip  whitespace from the `name`?")
-        options = [{"label": "strip", "consequence": "callers get a trimmed name"},
-                   {"label": "keep", "consequence": "the name is used exactly as given"}]
-        report = self.run_spec(assignment, [(SPEC_PATH, spec_text)],
-                               result="needs-decision", questions=["Strip whitespace from the name?"],
-                               options=["strip: callers get a trimmed name", "keep: the name is used exactly as given"],
-                               open_questions=[{"id": "Q1", "question": "Strip whitespace from the name?",
-                                                "options": options, "recommendation": "keep"}])
+        report = self.run_spec(assignment, [(SPEC_PATH, spec_text)], result="needs-decision",
+                               questions=["Strip whitespace from the name."], options=["strip", "keep"],
+                               open_questions=reworded)
         self.assertEqual("needs-decision", report.state, report.evidence_needs)
-        (self.epic_path / SPEC_PATH).write_text(SPEC_READY)
-        worker.historical_return(self.epic_repo, self.store, assignment)
-        other = self.prep_spec(key="s2")["assignment_id"]
-        report = self.run_spec(other, [(SPEC_PATH, spec_text)],
-                               result="needs-decision", questions=["Strip tabs from the name?"],
-                               options=["strip: callers get a trimmed name", "keep: the name is used exactly as given"],
-                               open_questions=[{"id": "Q1", "question": "Strip tabs from the name?",
-                                                "options": options, "recommendation": "keep"}])
+        row = self.coordinator.detail("assignment", assignment)
+        payload = read_receipt(self.epic_repo, row["return"]["event_ref"], row["return"]["payload_digest"])["profile_payload"]
+        self.assertEqual([{"id": "Q1", "question": file_question,
+                           "options": [{"label": "strip", "consequence": "callers get a trimmed name"},
+                                       {"label": "keep a name that the caller gave",
+                                        "consequence": "the name is used as given"}],
+                           "recommendation": "keep"}], payload["open_questions"])
+
+    def refused_spec(self, entries, asked=1):
+        """F25's limits: a refused attempt fences the worktree, so each refusal is its own test."""
+        assignment = self.prep_spec()["assignment_id"]
+        report = self.run_spec(assignment, [(SPEC_PATH, SPEC_WITH_QUESTION)], result="needs-decision",
+                               questions=["q"] * asked, options=["strip", "keep"], open_questions=entries)
         self.assertEqual("unknown", report.state)
         self.assertIn("differ from the spec", " ".join(report.evidence_needs))
 
-    def test_a_return_may_quote_an_option_label_without_its_code_marks(self):
-        # design §7 F21 (the recorded example run, 2026-10-20): the file's label is `fallback like `greet`'s
-        # `stranger``, the return's is the same words without the code marks; another label is another option.
-        assignment = self.prep_spec()["assignment_id"]
-        spec_text = SPEC_WITH_QUESTION.replace("keep (the name is used exactly as given)",
-                                               "fallback like `greet`'s `stranger` (the name is used exactly as given)")
-        options = [{"label": "strip", "consequence": "callers get a trimmed name"},
-                   {"label": "fallback like greet's stranger", "consequence": "the name is used exactly as given"}]
-        report = self.run_spec(assignment, [(SPEC_PATH, spec_text)],
-                               result="needs-decision", questions=["Strip whitespace from the name?"],
-                               options=["strip: callers get a trimmed name",
-                                        "fallback like greet's stranger: the name is used exactly as given"],
-                               open_questions=[{"id": "Q1", "question": "Strip whitespace from the name?",
-                                                "options": options, "recommendation": "strip"}])
-        self.assertEqual("needs-decision", report.state, report.evidence_needs)
-        (self.epic_path / SPEC_PATH).write_text(SPEC_READY)
-        worker.historical_return(self.epic_repo, self.store, assignment)
-        other = self.prep_spec(key="s2")["assignment_id"]
-        options[1]["label"] = "fallback like greet's visitor"
-        report = self.run_spec(other, [(SPEC_PATH, spec_text)],
-                               result="needs-decision", questions=["Strip whitespace from the name?"],
-                               options=["strip: callers get a trimmed name",
-                                        "fallback like greet's visitor: the name is used exactly as given"],
-                               open_questions=[{"id": "Q1", "question": "Strip whitespace from the name?",
-                                                "options": options, "recommendation": "strip"}])
-        self.assertEqual("unknown", report.state)
-        self.assertIn("differ from the spec", " ".join(report.evidence_needs))
+    OPTIONS = [{"label": "strip", "consequence": "c"}, {"label": "keep", "consequence": "c"}]
 
-    def test_a_return_may_end_a_question_with_a_full_stop_the_file_lacks(self):
-        # design §7 F22 (live hook 22): the file's entry runs on into its options, the return ends the sentence.
-        assignment = self.prep_spec()["assignment_id"]
-        spec_text = SPEC_WITH_QUESTION.replace("Strip whitespace from the name?", "Strip whitespace from the `name`")
-        options = [{"label": "strip", "consequence": "callers get a trimmed name"},
-                   {"label": "keep", "consequence": "the name is used exactly as given"}]
-        report = self.run_spec(assignment, [(SPEC_PATH, spec_text)],
-                               result="needs-decision", questions=["Strip whitespace from the name."],
-                               options=["strip: callers get a trimmed name", "keep: the name is used exactly as given"],
-                               open_questions=[{"id": "Q1", "question": "Strip whitespace from the name.",
-                                                "options": options, "recommendation": "keep"}])
-        self.assertEqual("needs-decision", report.state, report.evidence_needs)
+    def test_a_return_with_another_id_is_unknown(self):
+        self.refused_spec([{"id": "Q2", "question": "q", "options": self.OPTIONS, "recommendation": "keep"}])
+
+    def test_a_return_with_another_number_of_options_is_unknown(self):
+        self.refused_spec([{"id": "Q1", "question": "q", "options": self.OPTIONS[:1], "recommendation": "strip"}])
+
+    def test_a_return_whose_aggregate_asks_another_number_of_questions_is_unknown(self):
+        self.refused_spec([{"id": "Q1", "question": "q", "options": self.OPTIONS, "recommendation": "keep"}], asked=2)
 
     def test_spec_author_completed_return_commits_the_spec_file_only_and_bundles_it(self):
         # the completed attempt first: a refused attempt fences the worktree (as today), so the refusal comes last

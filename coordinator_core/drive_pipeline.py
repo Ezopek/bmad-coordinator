@@ -95,11 +95,8 @@ def _role(name: str, value) -> None:
     if "mode" in value:   # Copilot reviewer design revision 6, V1: the read mode, under the boundary only
         if value["mode"] != "read":
             raise _invalid(f"Role {name} mode must be read")
-        if name == "reviewer":
-            raise _unsupported("The read mode for the reviewer role is not implemented yet; give the reviewer role "
-                               "to claude-code or codex-cli")
-        if name != "judgment":
-            raise _invalid(f"Only the judgment role takes a mode, not {name}")
+        if name not in ("judgment", "reviewer"):
+            raise _invalid(f"Only the judgment and reviewer roles take a mode, not {name}")
         if not clients.get(value["client"]).read_mode:
             raise _unsupported(f"Role {name} client {value['client']} has no read mode")
         if value.get("boundary") != "bwrap":
@@ -137,6 +134,22 @@ def _head(step_id: str, steps: dict) -> dict:
     return steps[step_id]
 
 
+def read_review_profiles(pipeline: dict) -> list[str]:
+    """Copilot reviewer design V7, V8: the review profiles a read-mode reviewer of this pipeline must be qualified
+    for, so a start refuses before any work instead of at its first review."""
+    if (pipeline["roles"].get("reviewer") or {}).get("mode") != "read":
+        return []
+    steps = {step["id"]: step for step in pipeline["steps"]}
+    heads = {_head(step["of"], steps)["kind"] for step in pipeline["steps"] if step["kind"] == "review"}
+    return sorted({"spec": "spec-review", "implement": "code-review"}[kind] for kind in heads & {"spec", "implement"})
+
+
+def check_read_reviews(pipeline: dict) -> None:
+    for profile in read_review_profiles(pipeline):
+        reviewer = clients.get(pipeline["roles"]["reviewer"]["client"])
+        clients.read_ready(reviewer, clients.preflight(reviewer)[1], profile)
+
+
 def _source(step_id: str, steps: dict) -> str | None:
     """The skill of the author step that a chain of wrapper steps starts from."""
     return _head(step_id, steps).get("skill")
@@ -163,7 +176,8 @@ def _wrapper(step: dict, kinds: dict, roles: dict) -> None:
         _text(step["reviewer_id"], f"Step {sid} reviewer")
         if "reviewer" not in roles:
             raise _invalid(f"Step {sid} needs a reviewer role")
-        if not clients.get(roles["reviewer"]["client"]).write_free_readonly:
+        if not clients.get(roles["reviewer"]["client"]).write_free_readonly and \
+           roles["reviewer"].get("mode") != "read":
             raise _unsupported("The reviewer client has no write-free read-only mode")
 
 
@@ -379,6 +393,10 @@ def validate(value) -> dict:
                 raise _invalid(f"Step {step['of']} is taken by more than one step")
         kinds[sid] = step["kind"]
         seen[sid] = step
+    if roles.get("reviewer", {}).get("mode") == "read" and any(
+            step["kind"] == "review" and _head(step["of"], seen)["kind"] == "author" for step in steps):
+        raise _unsupported("The read mode for a planning review is not implemented yet; give the reviewer role to "
+                           "claude-code or codex-cli")   # Copilot reviewer design V2: spec and code reviews only
     named = {step["author_id"] for step in steps if step["kind"] in ("author", "spec", "implement")}
     if any(step["kind"] == "review" and step["reviewer_id"] in named for step in steps):
         raise _invalid("A reviewer must differ from every author of the pipeline")
@@ -971,7 +989,8 @@ def _review_state(step, sha, snapshot, facts, feature, compat_id, value, done) -
     half = sorted((row for row in live if row["id"] in facts["unbound"] and row["state"] == "prepared" and
                    _own(row["idempotency_key"], prefix)), key=lambda row: prepared[row["id"]])
     spec = {"bundle_id": bundle_id, "reviewer_id": step["reviewer_id"], "key": _next_key(sha, sid, rows),
-            "client": value["roles"]["reviewer"]["client"], **_boundary(value, "reviewer")}
+            "client": value["roles"]["reviewer"]["client"], **_boundary(value, "reviewer"),
+            **({"mode": "read"} if value["roles"]["reviewer"].get("mode") == "read" else {})}
     if compat_id is not None and not done[step["of"]].subjects.get("code"):   # design D22: planning only
         spec["compat_decision_id"] = compat_id
     if done[step["of"]].subjects.get("code"):   # ruling R9: the code lenses; design D24: a spec bundle's own

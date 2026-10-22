@@ -1575,8 +1575,24 @@ def _corrected_findings(carried) -> list[str]:
 
 def _review_rules(spec, bundle: dict) -> list[str]:
     """A story review brief's closing sections: the severity rubric, the return rules and the profile line."""
-    from .bmad_review import AFFECTED_IDS_RULE, REVIEW_RULES, SEVERITY_RULES
+    from .bmad_review import AFFECTED_IDS_RULE, READ_REVIEW_RULES, REVIEW_RULES, SEVERITY_RULES
     claude = spec.client == clients.CLAUDE.name
+    if getattr(spec, "mode", None) == "read":   # Copilot reviewer design V5, V6: staged inputs, no attestation
+        return ["", "## Severity rubric",
+                "`critical` = unsafe for downstream use or contradicts the story; `high`, `medium`, `low` otherwise by "
+                "consequence. Never lower a severity to make work pass.", *SEVERITY_RULES,
+                "", "## Rules",
+                "- You have only the `view`, `grep` and `glob` tools, over the staged files listed under Read-mode "
+                "inputs below; nothing else exists for you. Do not call any service.",
+                "- `location` is `path:line` at the bundle commit, with the path a Read-mode inputs line names.",
+                "- Return the required generic fields plus `bundle_id`, `manifest_digest`, `lenses_run`, `findings` "
+                "and `dispositions`; there is no `bundle_read`, the coordinator observes which files you read:",
+                *READ_REVIEW_RULES, AFFECTED_IDS_RULE,
+                "- Use result `blocked` with an explanation if you cannot read the staged files; that is not a review.",
+                "- Your final message is the return and nothing else: one JSON object, from `{` to `}`. A sentence "
+                "before or after it voids the review.",
+                "", "## Profile line", f"- bundle_id: `{bundle['id']}`",
+                f"- manifest_digest: `{bundle['manifest_digest']}`", f"- lenses: {', '.join(spec.lenses)}", ""]
     return ["", "## Severity rubric",
             "`critical` = unsafe for downstream use or contradicts the story; `high`, `medium`, `low` otherwise by "
             "consequence. Never lower a severity to make work pass.", *SEVERITY_RULES,
@@ -1591,6 +1607,17 @@ def _review_rules(spec, bundle: dict) -> list[str]:
             "", "## Profile line", f"- bundle_id: `{bundle['id']}`",
             f"- manifest_digest: `{bundle['manifest_digest']}`", f"- sealed root: `{bundle['path']}`",
             f"- lenses: {', '.join(spec.lenses)}", ""]
+
+
+def read_extras(store, feature: dict, manifest: dict) -> list[dict]:
+    """Copilot reviewer design V2, the code review: the attempt's sealed diff (its recorded digest) and the story spec
+    at the bundle's commit; both are read in full."""
+    commit, story = manifest["commit"], json.loads(feature["constraints_json"])
+    patch = store.path.parent / STORY_TOP / feature["id"] / f"diff-{commit['assignment_id']}.patch"
+    return [{"kind": "diff", "path": f"{commit['parent']}..{commit['sha']}.patch", "digest": commit["diff_sha256"],
+             "source": {"file": str(patch)}, "required": True},
+            {"kind": "spec", "path": story["spec_path"], "required": True,
+             "source": {"commit": commit["sha"], "path": story["spec_path"]}}]
 
 
 def review_brief(spec, worktree: Path, sealed, bundle: dict, feature: dict, manifest: dict, decisions, carried, store,
