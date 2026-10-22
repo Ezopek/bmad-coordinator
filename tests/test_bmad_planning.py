@@ -135,6 +135,13 @@ class MappingTests(unittest.TestCase):
         self.assertEqual("match", check(flow(), "completed")["customization_check"])
 
 
+class BoundScriptTests(unittest.TestCase):
+    def test_contract_bound_scripts_are_the_scripts_of_the_author_forms(self):
+        scripts = {command.split(" ")[3].removeprefix("/w/") for skill in (PRD, ARCH)
+                   for command in planning.author_commands("/w", CLIENT, skill, "ws")}
+        self.assertEqual({item.format(root=CLIENT) for item in contract.BOUND_SCRIPTS}, scripts)
+
+
 class PlanningCase(CoreBase):
     def setUp(self):
         super().setUp()
@@ -294,6 +301,27 @@ class PrepareTests(PlanningCase):
         self.assertEqual(("bmad-architecture", None), (binding["skill"], binding["prd_acceptance"]))
         self.assertTrue(binding["workspace"].endswith("/features/gitops/architecture"))
         self.assertTrue(binding["artifact"].endswith("/ARCHITECTURE-SPINE.md"))
+
+    def test_ruled_authors_bind_the_architecture_lint_and_name_the_sequential_gate_while_codex_does_not(self):
+        arch = dict(skill=ARCH, altitude="feature", purpose="build-substrate", inputs=["docs/authority.md"],
+                    input_roles={"docs/authority.md": "authority"})
+        for client in ("claude-code", "copilot"):
+            with self.subTest(client=client):
+                prepared = self.prep(f"a-{client}", slug=client, client=client, **arch)
+                binding, text = self.binding_of(prepared["assignment_id"]), self.brief_of(prepared)
+                ws, output = binding["workspace"], f"{binding['workspace']}/.lint-spine.json"
+                self.assertEqual(f"uv run --no-project {binding['worktree']}/{CLIENT}/{ARCH}/scripts/lint_spine.py "
+                                 f"--workspace {ws} --output {output}", binding["commands"][4])
+                self.assertEqual(5, len(binding["commands"]))
+                self.assertIn(planning.SUBAGENT_RULE.format(workspace=ws) + "\n", text)
+                self.assertIn(planning.LINT_RULE.format(output=output) + "\n", text)
+                prd = self.prep(f"p-{client}", slug=f"{client}-prd", client=client)
+                self.assertEqual(4, len(self.binding_of(prd["assignment_id"])["commands"]))
+                self.assertIn("No subagent tool is offered in this run.", self.brief_of(prd))
+                self.assertNotIn("lint_spine", self.brief_of(prd))
+        codex = self.prep("a-codex", slug="codex", **arch)
+        self.assertNotIn("commands", self.binding_of(codex["assignment_id"]))
+        self.assertNotIn("No subagent tool", self.brief_of(codex))  # a Codex author's tools are not pinned
 
     def test_parent_spine_frozen_dependency_or_explicit_no_parent_brief(self):
         arch = dict(skill=ARCH, altitude="feature", inputs=["docs/authority.md"],

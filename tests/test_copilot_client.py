@@ -1060,6 +1060,31 @@ class CopilotClientTests(Harness):
     def uv_calls(self, out: Path) -> list:
         return [item["argv"] for item in self.uv_records(out)]
 
+    def test_script_launcher_runs_the_architecture_lint_only_with_its_workspace_output(self):
+        commands = tuple(planning.author_commands("/w", ".agents/skills", ARCH, "ws/arch"))
+        lint = clients.launcher_forms(commands)[4]
+        self.assertEqual(("/w/.agents/skills/bmad-architecture/scripts/lint_spine.py", "--workspace", "ws/arch",
+                          "--output", "ws/arch/.lint-spine.json"), lint)
+        out, worktree, directory = self.recording_uv(), self.root / "lint-worktree", self.root / "lint-run"
+        worktree.mkdir()
+        directory.mkdir()
+        tools = {"python": sys.executable, "uv": str(self.fake_dir / "uv"), "path": os.environ["PATH"],
+                 "home": str(self.root / "sealed-home")}
+        clients.write_launcher(directory, clients.launcher_bytes(commands, tools, str(worktree)))
+
+        def launch(*args):
+            before = len(self.uv_records(out))
+            done = subprocess.run([str(clients.launcher_path(directory)), *args], capture_output=True, text=True,
+                                  cwd=self.root)
+            return done.returncode, len(self.uv_records(out)) - before
+
+        self.assertEqual((0, 1), launch(*lint))
+        for extra in (("--output", "/elsewhere/x.json"), ("--output=/x",), ("--o", "/x"), ("--out=/x",), ("-o", "/x"),
+                      ("--workspace", "/elsewhere")):  # the report never leaves the bound workspace file
+            with self.subTest(extra=extra):
+                self.assertEqual((2, 0), launch(*lint, *extra))
+        self.assertEqual((2, 0), launch(*lint[:3]))  # the skill's own stdout form is not bound
+
     def test_script_launcher_runs_only_bound_forms_and_refuses_everything_else(self):
         commands = tuple(planning.author_commands("/w", ".agents/skills", "bmad-prd", "ws/prd"))
         forms = clients.launcher_forms(commands)

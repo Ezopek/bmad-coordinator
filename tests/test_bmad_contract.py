@@ -115,6 +115,20 @@ class DiscoveryTests(ContractBase):
         self.assertEqual(set(), {key for key in first.contract if "time" in key or "date" in key})
         self.assertEqual(contract.fingerprint(first.contract), first.fingerprint_sha256)
 
+    def test_documented_scripts_without_a_bound_form_are_facts_outside_the_fingerprint(self):
+        before = self.report()
+        self.assertEqual([], before.facts["unbound_scripts"])  # the fixture documents memlog.py only
+        self.assertIn("no subagent tool", " ".join(before.limitations))
+        write(self.root, f"{CLIENT}/bmad-architecture/references/reviewer-gate.md",
+              "Lint first: `uv run {skill-root}/scripts/lint_spine.py --workspace {doc_workspace}`.\n")
+        write(self.root, f"{CLIENT}/bmad-review/references/editorial-common.md",
+              "Counts: `uv run {skill-root}/scripts/word_metrics.py <path>`, then "
+              "`uv run --no-project {project-root}/_bmad/scripts/other.py`, never `uv run elsewhere.py`.\n")
+        after = self.report()
+        self.assertTrue(after.supported, after.reasons)
+        self.assertEqual([f"{CLIENT}/bmad-review/scripts/word_metrics.py", "_bmad/scripts/other.py"],
+                         after.facts["unbound_scripts"])  # lint_spine.py has a bound form (issue #1)
+
     def test_facts_head_tools_parity_manifest_do_not_change_fingerprint(self):
         before = self.report()
         write(self.root, "unrelated.txt", "new commit\n")
@@ -224,6 +238,13 @@ class DiscoveryTests(ContractBase):
         write(self.root, "_bmad/custom/config.toml", '[modules.bmm]\nplanning_artifacts = "/outside"\n')
         with self.assertRaises(DomainError):
             contract.central_path(self.root, "modules.bmm.planning_artifacts")
+        # F23: BMAD 6.12.0 installs `output_folder = "_bmad-output"`, relative to the project root
+        write(self.root, "_bmad/custom/config.toml", '[core]\noutput_folder = "_bmad-output"\n')
+        self.assertEqual("_bmad-output", contract.central_path(self.root, "core.output_folder"))
+        for outside in ("../elsewhere", ".", "a/../.."):
+            write(self.root, "_bmad/custom/config.toml", f'[core]\noutput_folder = "{outside}"\n')
+            with self.subTest(outside=outside), self.assertRaises(DomainError):
+                contract.central_path(self.root, "core.output_folder")
         with self.assertRaises(DomainError):
             contract.central_path(self.root, "modules.bmm.absent_key")
 

@@ -107,16 +107,35 @@ LAUNCHER_RULE = ("- The installed skills write these commands as `uv run --no-pr
 
 def author_commands(worktree, root: str, skill: str, workspace: str) -> list[str]:
     """Design sections 5 and 14: the exact `uv` prefixes a Claude or Copilot author may run (customization, config,
-    memlog init and append), sealed in its binding as `commands` and rendered as advisory Bash or `shell(...)` rules
-    plus a stdin-only sha256sum. A path with a glob or permission-pattern metacharacter is refused before any rule,
-    brief or binding exists."""
+    memlog init and append, and for the architecture skill its Reviewer Gate lint, issue #1), sealed in its binding
+    as `commands` and rendered as advisory Bash or `shell(...)` rules plus a stdin-only sha256sum. A path with a glob
+    or permission-pattern metacharacter is refused before any rule, brief or binding exists."""
     if not all(clients.pattern_safe(str(item)) for item in (worktree, root, skill, workspace)):
         raise _invalid("Worktree, client root or workspace contains a glob or permission-pattern character")
     scripts = f"{worktree}/_bmad/scripts"  # stdlib scripts with inline metadata: no project is read or synced
-    return [f"uv run --no-project {scripts}/resolve_customization.py --skill {worktree}/{root}/{skill}",
-            f"uv run --no-project {scripts}/resolve_config.py --project-root {worktree}",
-            f"uv run --no-project {scripts}/memlog.py init --workspace {workspace}",
-            f"uv run --no-project {scripts}/memlog.py append --workspace {workspace}"]
+    commands = [f"uv run --no-project {scripts}/resolve_customization.py --skill {worktree}/{root}/{skill}",
+                f"uv run --no-project {scripts}/resolve_config.py --project-root {worktree}",
+                f"uv run --no-project {scripts}/memlog.py init --workspace {workspace}",
+                f"uv run --no-project {scripts}/memlog.py append --workspace {workspace}"]
+    if skill == "bmad-architecture":  # issue #1: the gate's lint, its report bound to a workspace file (not stdout)
+        # so a Copilot launcher refuses any other --output (repeated, abbreviated or short) and the delta holds it
+        commands.append(f"uv run --no-project {worktree}/{root}/{skill}/scripts/lint_spine.py --workspace {workspace} "
+                        f"--output {workspace}/{LINT_OUTPUT}")
+    return commands
+
+
+LINT_OUTPUT = ".lint-spine.json"
+# Issue #1 (BMAD 6.12): a bound Claude or Copilot author has no subagent tool (no `Agent` in AUTHOR_TOOLS; Copilot's
+# pinned set drops `task`), so the skills' subagent steps take their documented sequential fallback in the author's
+# own context; that gate is a self-check, and the pipeline's review step stays the independent review.
+SUBAGENT_RULE = ("- No subagent tool is offered in this run. Where the skill dispatches subagents (research, input "
+                 "reconciliation, the Reviewer Gate's rubric walker and reviewer lenses), take its sequential fallback "
+                 "in this process: write each review to its file under `{workspace}/reviews/` first, then go on. Add "
+                 "one `assumptions` entry saying that the reviewer gate ran sequentially without subagents. That gate "
+                 "is your own check, not an independent review: the coordinator reviews the bundle separately.")
+LINT_RULE = ("- The Reviewer Gate's `lint_spine.py` is bound above with `--output {output}`: it writes its JSON report "
+             "to that file instead of printing it. Run it in exactly that form, with no further argument, and read "
+             "the file.")
 
 
 # The `workflow_json` keys `check` reads (workflow_json skeleton round): the intent, a status, the four lists and,
@@ -687,6 +706,10 @@ def _brief(spec, worktree, workspace, roles, decisions, continuation, prior, inh
                   "- Write your return JSON, one object, to the envelope's `return_path` and nowhere else, with your "
                   "file-creation tool (`create`, or `edit` to fix it); a shell redirect is accepted but discouraged. "
                   "Your final message is never read as the return."]
+    if claude or copilot:  # issue #1: the clients whose author tools are pinned without a subagent tool
+        lines.append(SUBAGENT_RULE.format(workspace=workspace))
+        if skill == "bmad-architecture":
+            lines.append(LINT_RULE.format(output=f"{workspace}/{LINT_OUTPUT}"))
     return "\n".join(lines) + "\n"
 
 

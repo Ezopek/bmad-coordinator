@@ -42,7 +42,16 @@ LIMITATIONS = [
     "capability recognition proves the shape of installed text, not that a worker will follow it",
     "network research, MCP tools and URLs used by skills are not fingerprinted",
     "worker permission, descendant and reading statements stay claims",
+    "a bound Claude or Copilot author has no subagent tool: the skills' subagent steps run sequentially in its own "
+    "context and stay a self-check, never an independent review",
 ]
+# Issue #1: the installed scripts a bound Claude or Copilot author may run (`bmad_planning.author_commands` renders
+# their exact forms; a test keeps the two in step; `{root}` is the client root). `discover` reports every other
+# `uv run` script the required skills document as `facts["unbound_scripts"]`: before any model call, what a bound
+# author must do by the skill's own fallback. Facts only, outside the fingerprint.
+BOUND_SCRIPTS = ("_bmad/scripts/resolve_customization.py", "_bmad/scripts/resolve_config.py", "_bmad/scripts/memlog.py",
+                 "{root}/bmad-architecture/scripts/lint_spine.py")
+DOCUMENTED = re.compile(r"uv run (?:--no-project )?\{(project-root|skill-root)\}/([\w./-]+\.py)")
 
 
 @dataclass(frozen=True)
@@ -231,6 +240,18 @@ def discover(worktree: Path, client_root: str = ".agents/skills") -> ContractRep
     if scripts["memlog.py"] and not _run_ok([str(bmad / "scripts/memlog.py"), "--help"], worktree):
         capabilities["memlog_script"] = False
         reasons.append("installed memlog.py does not run under this interpreter")
+    documented = set()  # issue #1: scripts the skills' own text runs (skill trees only, read from the hashed files)
+    for rel in sorted(files):
+        owner = next((skill for skill in skills if rel.startswith(f"{client_root}/{skill}/")), None)
+        if owner is None or not rel.endswith(".md"):
+            continue
+        try:
+            text = (worktree / rel).read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            continue
+        for anchor, script in DOCUMENTED.findall(text):
+            documented.add(os.path.normpath(script if anchor == "project-root" else f"{client_root}/{owner}/{script}"))
+    unbound = sorted(documented - {item.format(root=client_root) for item in BOUND_SCRIPTS})
     # 3. Contract closure: scripts, config, custom layer.
     if (bmad / "scripts").is_dir() and not (bmad / "scripts").is_symlink():
         tree(bmad / "scripts")
@@ -330,7 +351,8 @@ def discover(worktree: Path, client_root: str = ".agents/skills") -> ContractRep
                        else "differs") for skill in skills} if client_root != ".claude/skills" else {}
     facts = {"head_commit": head.stdout.strip() if head.returncode == 0 else "",
              "tools": {"uv": _version(uv) if uv else "", "python": sys.version.split()[0]},
-             "sibling_parity": sibling, "manifest_check": _manifest_check(worktree, client_root, skills)}
+             "sibling_parity": sibling, "manifest_check": _manifest_check(worktree, client_root, skills),
+             "unbound_scripts": unbound}
     contract_files = [{"path": path, "digest": digest} for path, digest in sorted(files.items())]
     body = {"format": 1, "client_root": client_root, "files": contract_files,
             "references": sorted(references, key=lambda item: (item["skill"], item["ref"])),
@@ -396,7 +418,9 @@ def check_binding(worktree: Path | None, binding: dict, store, feature: dict) ->
 
 
 def central_path(worktree: Path, key: str) -> str:
-    """Worktree-relative path from a merged central config key; unresolved placeholders fail, never default."""
+    """Worktree-relative path from a merged central config key; unresolved placeholders fail, never default. A
+    relative value is relative to the project root, as BMAD reads it (F23: the 6.12.0 installer writes
+    `output_folder = "_bmad-output"`); either way the path must lie inside the worktree."""
     worktree = Path(worktree).resolve()
     script = worktree / "_bmad/scripts/resolve_config.py"
     value, _ = _resolve([str(script), "--project-root", str(worktree)], worktree) if script.is_file() else (None, "")
@@ -406,7 +430,7 @@ def central_path(worktree: Path, key: str) -> str:
         value = value.get(part) if isinstance(value, dict) else None
     if not isinstance(value, str) or not value or PLACEHOLDER.search(value):
         raise DomainError("UNSUPPORTED_CONTRACT", f"Central config key {key} is absent or has unresolved placeholders")
-    path = Path(os.path.normpath(value.replace("{project-root}", str(worktree))))
+    path = Path(os.path.normpath(worktree / value.replace("{project-root}", str(worktree))))  # absolute stays absolute
     if not path.is_absolute() or not path.is_relative_to(worktree) or path == worktree:
         raise DomainError("UNSUPPORTED_CONTRACT", f"Central config key {key} must resolve inside the worktree")
     return path.relative_to(worktree).as_posix()

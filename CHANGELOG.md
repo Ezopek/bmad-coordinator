@@ -2,6 +2,11 @@
 
 Dates, with one tag: `v0.1.0` marks the first public release (2026-10-20, the entry below, published as the single-root history of this repository); the installed package carries a `package_revision` digest, not a version. Each entry names the design document (under `docs/`) whose decisions it implements; the document's status line records the evidence.
 
+## 2026-10-22
+
+- Issue #1, the BMAD 6.12 architecture Reviewer Gate ([design](docs/claude-adapter-design.md) §5, amended): a bound Claude or Copilot architecture author may run the gate's `lint_spine.py`, bound with its report written to `<workspace>/.lint-spine.json`, so the Copilot launcher refuses any other `--output` and the report lies in the audited delta. Every bound Claude or Copilot planning brief says that no subagent tool is offered, that the skills' subagent steps take their sequential fallback (each review written under `<workspace>/reviews/`, one `assumptions` entry) and that this gate is a self-check, not the independent review. `bmad discover` lists in `facts.unbound_scripts` every other `uv run` script the required skills document (6.12: `bmad-review`'s `word_metrics.py`, whose word counts fall back to estimates), before any model call.
+- F23: a relative central config path resolves against the project root, as BMAD reads it. The BMAD 6.12.0 installer writes `output_folder = "_bmad-output"`, which `bmad prepare` and `bmad review prepare` refused before (`UNSUPPORTED_CONTRACT`, found by the issue #1 live check); a path outside the worktree is still refused.
+
 ## 2026-10-20 (v0.1.0)
 
 - The backlog adapter ([design](docs/backlog-design.md), A1 to A6): the drives read and edit the backlog through one contract (stories, entries, preconditions, status files and edits, protected directories); the BMAD layout is the code of before moved behind it unchanged, the one shipped and the default; `project.backlog: {"kind"}` names a layout from the closed registry; a contract test every layout must pass; the name stays until a second layout lands.
