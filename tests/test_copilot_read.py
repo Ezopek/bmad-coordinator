@@ -93,6 +93,17 @@ class RoleTests(unittest.TestCase):
                 drive_pipeline.check_read_reviews(pipeline)
             self.assertIn("spec-review", caught.exception.message)
 
+    def test_a_story_roles_override_with_a_read_mode_reviewer_is_checked_too(self):
+        from coordinator_core import drive_epic
+        template = json.loads((ROOT / "examples" / "greetings" / "pipeline.json").read_text())
+        override = {"reviewer": {"client": "copilot", "model": "claude-sonnet-5", "mode": "read", "boundary": "bwrap"}}
+        with patch.object(clients, "preflight", return_value=("copilot", "GitHub Copilot CLI 9.9.9.")), \
+             patch.dict(clients.READ_QUALIFIED, {}, clear=True), self.assertRaises(DomainError) as caught:
+            drive_epic._check_overrides(template, {"1-2-farewell": {"roles": override}},
+                                        drive_epic.RunBounds(max_turns=20, deadline_seconds=7200.0, human_wait_seconds=0.0))
+        self.assertEqual("UNSUPPORTED_CLIENT_MODE", caught.exception.code)
+        self.assertIn("Story 1-2-farewell", caught.exception.message)
+
     def test_a_planning_review_in_read_mode_is_refused(self):
         from coordinator_core import drive_pipeline
         value = {"kind": "drive-pipeline", "format": 1, "feature_id": "0" * 32, "mandate_revision": 1,
@@ -166,6 +177,9 @@ class ReadModeTests(unittest.TestCase):
                                                                                 ["grep", "question.json"]]))
         self.assertEqual(("observed", []), (result.state, result.needs))
         self.assertEqual(b'{"answer": "yes"}', (root / "receipts" / "last.json").read_bytes())
+        root, result = self.isolated(qualified=True, FAKE_READ_VIEWS=READS,   # a repeated key with equal values
+                                     FAKE_READ_ANSWER='{"answer": "yes", "answer": "yes"}')
+        self.assertEqual("observed", result.state, result.needs)
 
     def test_the_stream_rules_fail_closed(self):
         outside = self.base / "outside.txt"

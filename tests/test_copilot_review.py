@@ -30,28 +30,41 @@ def flag(name):
     return args[args.index(name) + 1]
 assert flag("--available-tools") == "glob,grep,view", args
 assert "--allow-tool" not in args and "--add-dir" not in args, args
-envelope = json.loads(flag("-p"))
-session, cwd, home = flag("--session-id"), pathlib.Path(flag("-C")), pathlib.Path(os.environ["COPILOT_HOME"])
+cwd, home = pathlib.Path(flag("-C")), pathlib.Path(os.environ["COPILOT_HOME"])
+repair = "--resume" in args   # the one repair round resumes the run's session; the state already exists
+session = flag("--resume") if repair else flag("--session-id")
 state = home / "session-state" / session
-state.mkdir(parents=True)
-stamp = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-(state / "workspace.yaml").write_text("id: %s\ncwd: %s\ncreated_at: %s\n" % (session, cwd, stamp))
-(state / "events.jsonl").write_text(json.dumps({"type": "session.shutdown", "data": {"requests": {"m": 1}}}) + "\n")
+if repair:
+    assert state.is_dir() and "--session-id" not in args, args
+    assert json.loads(flag("-p"))["kind"] == "coordinator-read-repair", args
+    envelope = json.loads((home.parent / "envelope.json").read_text())
+    (home.parent / "repair-count").write_text(str(int((home.parent / "repair-count").read_text() or 0) + 1)
+                                              if (home.parent / "repair-count").exists() else "1")
+else:
+    envelope = json.loads(flag("-p"))
+    state.mkdir(parents=True)
+    stamp = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    (state / "workspace.yaml").write_text("id: %s\ncwd: %s\ncreated_at: %s\n" % (session, cwd, stamp))
+    (state / "events.jsonl").write_text(json.dumps({"type": "session.shutdown", "data": {"requests": {"m": 1}}}) + "\n")
 def emit(kind, data=None, **top):
     print(json.dumps({"type": kind, "data": data or {}, **top}), flush=True)
 emit("session.mcp_servers_loaded", {"servers": [{"name": "github-mcp-server", "status": "disabled"}]})
 emit("session.usage_checkpoint", {"promptCacheBreakState": [{"models": {"m": {"tools": [
     {"name": n} for n in ("view", "grep", "glob")]}}}]})
-views = os.environ.get("FAKE_READ_VIEWS", "*")
-paths = sorted(str(p) for p in (cwd / "inputs").rglob("*") if p.is_file()) if views == "*" else json.loads(views)
-skip = os.environ.get("FAKE_READ_SKIP", "")
+views = os.environ.get("FAKE_READ_REPAIR_VIEWS", "[]") if repair else os.environ.get("FAKE_READ_VIEWS", "*")
+staged = sorted(str(p) for p in (cwd / "inputs").rglob("*") if p.is_file())
+paths = staged if views == "*" else [p for p in staged if any(part in p for part in json.loads(views))]
+skip = "" if repair else os.environ.get("FAKE_READ_SKIP", "")
 for index, path in enumerate(item for item in paths if not (skip and skip in item)):
     emit("tool.execution_start", {"toolCallId": "c%d" % index, "toolName": "view", "arguments": {"path": path}})
     content = pathlib.Path(path).read_text() if os.path.isfile(path) else ""
     emit("tool.execution_complete", {"toolCallId": "c%d" % index, "success": True, "result": {"content": content}})
-answer = {**json.loads(os.environ["FAKE_READ_REVIEW"]), "assignment_id": envelope["assignment_id"],
-          "request_fingerprint": envelope["request_fingerprint"]}
-emit("assistant.message", {"content": json.dumps(answer)})
+answer = {**json.loads(os.environ["FAKE_READ_REPAIR" if repair else "FAKE_READ_REVIEW"]),
+          "assignment_id": envelope["assignment_id"], "request_fingerprint": envelope["request_fingerprint"]}
+text = json.dumps(answer)
+if not repair and os.environ.get("FAKE_READ_PROSE"):
+    text = "Here is my review.\n\n```json\n" + text + "\n```"
+emit("assistant.message", {"content": text})
 emit("result", None, sessionId=session, exitCode=0, usage={"premiumRequests": 1})
 '''
 QUALIFIED = {"9.9.9": {"code-review": clients.READ_CONTRACT, "spec-review": clients.READ_CONTRACT}}
@@ -104,9 +117,20 @@ class ReadReviewTests(StoryCase):
                   "findings": [{"lens": binding["lenses"][0], "location": "pkg/greet.py:1", "trigger_condition": "t",
                                 "guard_snippet": "g", "potential_consequence": "c", "severity": "low", **item}
                                for item in findings], "dispositions": []}
+        repair = {**answer, **json.loads(env.pop("FAKE_REPAIR_EXTRA", "{}"))}   # the repair round's answer
         answer.update(json.loads(env.pop("FAKE_ANSWER_EXTRA", "{}")))
-        with patch.dict(os.environ, {**self.read_env, "FAKE_READ_REVIEW": json.dumps(answer), **env}):
+        with patch.dict(os.environ, {**self.read_env, "FAKE_READ_REVIEW": json.dumps(answer),
+                                     "FAKE_READ_REPAIR": json.dumps(repair), **env}):
             return worker.run_assignment(repo or self.story_repo, self.store, self.owner, assignment, "fake-model", 30)
+
+    def repaired(self, report, reason):
+        """The one repair round happened for `reason`, and the receipts carry it."""
+        run_dir = Path(report.run_dir)
+        record = json.loads((run_dir / clients.REPAIR_RECORD).read_text())
+        self.assertIn(reason, record["reason"])
+        self.assertEqual(("--resume", "1"), (record["argv"][1], (run_dir / "repair-count").read_text()))
+        self.assertTrue((run_dir / clients.REPAIR_STREAM).exists())
+        return record
 
     def test_a_code_review_in_read_mode_is_observed_recorded_and_replays_without_its_staged_copy(self):
         prepared = self.prepare(self.code_bundle())
@@ -119,8 +143,11 @@ class ReadReviewTests(StoryCase):
         brief = (self.story_path / prepared["brief_ref"]).read_text()
         self.assertIn("## Read-mode inputs (your only files)", brief)
         self.assertNotIn("`bundle_read` holds one object", brief)
-        report = self.review(prepared["assignment_id"], findings=[{"severity": "medium"}])
+        alias = next(item["alias"] for item in binding["read_inputs"] if item["path"] == "pkg/greet.py")
+        report = self.review(prepared["assignment_id"], findings=[{"severity": "medium", "location": f"{alias}:1"}])
         self.assertEqual("completed-claim", report.state, report.evidence_needs)
+        sealed = json.loads((Path(report.run_dir) / "return.json").read_text())
+        self.assertEqual(["pkg/greet.py:1"], [item["location"] for item in sealed["profile_payload"]["findings"]])
         launch = json.loads((Path(report.run_dir) / "launch.json").read_text())
         self.assertEqual(("read", False, str(Path(report.run_dir) / worker.READ_CWD)),
                          (launch["requested_mode"], launch["qualification"], launch["cwd"]))
@@ -162,11 +189,55 @@ class ReadReviewTests(StoryCase):
         self.assertEqual("unknown", report.state)
         self.assertIn(need, " ".join(report.evidence_needs))
 
-    def test_a_reviewed_file_not_read_in_full_is_unknown(self):
-        self.refused("did not read pkg/greet.py in full", FAKE_READ_SKIP="greet.py")
+    def test_a_reviewed_file_not_read_in_either_round_is_unknown(self):
+        prepared = self.prepare(self.code_bundle())
+        report = self.review(prepared["assignment_id"], FAKE_READ_SKIP="greet.py")
+        self.assertEqual("unknown", report.state)
+        self.assertIn("did not read pkg/greet.py in full", " ".join(report.evidence_needs))
+        self.repaired(report, "did not read pkg/greet.py in full")   # asked once, not answered by a read
 
-    def test_an_attestation_in_the_answer_is_unknown(self):
-        self.refused("does not match", FAKE_ANSWER_EXTRA=json.dumps({"bundle_read": []}))
+    def test_a_missed_read_is_made_up_in_the_repair_round(self):
+        prepared = self.prepare(self.code_bundle())
+        report = self.review(prepared["assignment_id"], FAKE_READ_SKIP="greet.py",
+                             FAKE_READ_REPAIR_VIEWS=json.dumps(["greet.py"]))
+        self.assertEqual("completed-claim", report.state, report.evidence_needs)
+        self.repaired(report, "did not read pkg/greet.py in full")
+
+    def test_a_refused_answer_is_repaired_once_recorded_and_replays(self):
+        """§10 R1: a finding missing a field is refused, the resumed session answers again, and the review stands.
+        The receipts carry the repair record and stream, and replay checks them."""
+        prepared = self.prepare(self.code_bundle())
+        bad = {"findings": [{"lens": "acceptance", "location": "pkg/greet.py:1", "guard_snippet": "g",
+                             "potential_consequence": "c", "severity": "high"}]}   # no trigger_condition
+        report = self.review(prepared["assignment_id"], findings=[{"severity": "high"}],
+                             FAKE_ANSWER_EXTRA=json.dumps(bad))
+        self.assertEqual("completed-claim", report.state, report.evidence_needs)
+        record = self.repaired(report, "finding entry has the wrong fields")
+        sealed = json.loads((Path(report.run_dir) / "return.json").read_text())
+        self.assertEqual((True, record["envelope_sha256"]), (sealed["client_facts"]["repair"], json.loads(
+            (Path(report.run_dir) / clients.REPAIR_ENVELOPE).read_bytes()) and record["envelope_sha256"]))
+        self.assertIn("repair_sha256", sealed)
+        self.assertEqual(["high"], [item["severity"] for item in sealed["profile_payload"]["findings"]])
+        bmad_review.record_bound_review(self.story_repo, self.store, self.owner, prepared["assignment_id"])
+        shutil.rmtree(Path(report.run_dir) / worker.READ_CWD)
+        self.assertEqual("completed-claim", worker.inspect_run(self.story_repo, self.store,
+                                                               prepared["assignment_id"]).state)
+        (Path(report.run_dir) / clients.REPAIR_STREAM).write_bytes(b"")   # a tampered repair stream is caught
+        self.assertEqual("unknown", worker.inspect_run(self.story_repo, self.store, prepared["assignment_id"]).state)
+
+    def test_prose_around_the_first_answer_is_repaired(self):
+        prepared = self.prepare(self.code_bundle())
+        report = self.review(prepared["assignment_id"], FAKE_READ_PROSE="1")
+        self.assertEqual("completed-claim", report.state, report.evidence_needs)
+        self.repaired(report, "Expecting value")
+
+    def test_a_second_refused_answer_is_unknown_with_no_third_round(self):
+        prepared = self.prepare(self.code_bundle())
+        bad = json.dumps({"bundle_read": []})   # an attestation the read schema has no room for
+        report = self.review(prepared["assignment_id"], FAKE_ANSWER_EXTRA=bad, FAKE_REPAIR_EXTRA=bad)
+        self.assertEqual("unknown", report.state)
+        self.assertIn("does not match", " ".join(report.evidence_needs))
+        self.repaired(report, "does not match")
 
     def test_an_unqualified_version_refuses_the_prepare_and_a_qualification_run_is_never_observed(self):
         bundle = self.code_bundle()

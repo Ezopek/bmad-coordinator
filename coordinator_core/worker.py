@@ -135,8 +135,40 @@ def _observed_reads(final: dict, binding: dict, reads: dict) -> dict:
     for item in binding["read_inputs"]:
         if item["required"] and reads.get(item["alias"]) != item["digest"]:
             raise DomainError("UNKNOWN_EVIDENCE", f"The read-mode reviewer did not read {item['path']} in full")
-    return {**final, "bundle_read": [{"path": item["path"], "sha256": item["digest"]}
-                                     for item in binding["sealed_files"]]}
+    # §10 R3 (as F16 for the sealed location): a finding that locates by the staged alias names the manifest path
+    aliases = {item["alias"]: item["path"] for item in binding["read_inputs"]}
+    findings = [{**finding, "location": _unaliased(finding["location"], aliases)} if isinstance(finding, dict) and
+                isinstance(finding.get("location"), str) else finding for finding in final.get("findings") or []]
+    return {**final, "findings": findings, "bundle_read": [{"path": item["path"], "sha256": item["digest"]}
+                                                           for item in binding["sealed_files"]]}
+
+
+def _unaliased(location: str, aliases: dict) -> str:
+    for alias, path in aliases.items():
+        if location == alias or location.startswith(alias + ":"):
+            return path + location[len(alias):]
+    return location
+
+
+def _read_refusal(directory: Path, launch: dict, assignment, binding, profile) -> str | None:
+    """§10 R1: what the one repair round would be asked to fix: the answer is not one JSON object, it does not fit
+    the schema, a required input was not read in full, or the review profile refuses it. None when the return
+    stands, or when the stream itself is defective (nothing a second answer repairs)."""
+    try:
+        final_bytes, reads, error = clients.read_answer(directory, launch)
+    except DomainError:
+        return None
+    if error:
+        return error
+    try:
+        final = _observed_reads(_final(json.loads(final_bytes), assignment, profile, True), binding, reads)
+        if final["result"] == "completed":
+            profile.check(final, assignment, binding, directory, [])
+    except DomainError as exc:
+        return exc.message
+    except (ValueError, KeyError, TypeError) as exc:
+        return str(exc)
+    return None
 
 
 READ_RETURN = ("Your cwd is `{cwd}` and holds only the staged inputs the brief lists under `inputs/`. Use only the "
@@ -418,6 +450,11 @@ def _validated_receipt(repo, store, assignment, directory, historical=False):
     if read != (binding is not None and binding.get("mode") == "read") or launch.get("qualification") is True:
         raise DomainError("UNKNOWN_EVIDENCE", "The receipt's read mode differs from its binding, or it is a "
                           "qualification run, which is never observed")
+    repaired = (directory / clients.REPAIR_STREAM).exists()   # §10 R1: the repair round's retained bytes
+    if repaired != ("repair_sha256" in value) or (repaired and (
+            _sha256_file(directory / clients.REPAIR_RECORD) != value["repair_sha256"] or
+            _sha256_file(directory / clients.REPAIR_STREAM) != value["repair_events_sha256"])):
+        raise DomainError("UNKNOWN_EVIDENCE", "The repair round's retained bytes differ from the receipt")
     if "client" in launch:  # receipts written since the client registry also need a clean D16 record
         _clean_integrity(directory)
     if (launch.get("profile"), launch.get("binding_sha256"), value.get("profile")) != \
@@ -448,6 +485,8 @@ def _validated_receipt(repo, store, assignment, directory, historical=False):
                 json.loads(check.read_bytes()), launch["script_launcher"].get("sha256")):
             raise DomainError("UNKNOWN_EVIDENCE", "Sealed script launcher check differs or failed")
     terminal = client.terminal(directory, launch)  # the recorded client's parser, over retained bytes only
+    if terminal.facts.get("answer_error"):
+        raise DomainError("UNKNOWN_EVIDENCE", "Read-mode stream invalid: " + terminal.facts["answer_error"])
     thread = terminal.thread_id
     if value.get("thread_id") != thread or value.get("source_id") != clients.source_id(client.name, thread) or \
        clients.client_of(value["source_id"]) != client.name:
@@ -743,6 +782,42 @@ def run_assignment(repo: RepoIdentity, store: Store, owner: OwnerRef, assignment
                                                "exit_code": process.poll(),
                                                "ended_at": datetime.now(timezone.utc).isoformat(),
                                                "timed_out": timed_out})
+                reason = _read_refusal(directory, launch, assignment, binding, profile) \
+                    if read and not timed_out and process.returncode == 0 and group["group_terminated"] else None
+                if reason:   # §10 R1: one repair round, the same session resumed with the exact refusal
+                    repair_argv = clients.read_repair_argv(spec, session)
+                    repair_envelope = canonical(clients.read_repair_envelope(reason, schema, {
+                        "assignment_id": assignment["id"], "request_fingerprint": assignment["request_fingerprint"]}))
+                    private_file(directory / clients.REPAIR_ENVELOPE, repair_envelope)
+                    first_answer = _sha256_file(directory / "events.jsonl")
+                    spawned, _, copies = clients.boundary_launch(
+                        plan, cwd, repair_argv, clients.spawn_argv(chosen, repair_argv, repair_envelope))
+                    out2 = os.open(directory / clients.REPAIR_STREAM,
+                                   os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                    err2 = os.open(directory / "stderr-repair.log",
+                                   os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                    with os.fdopen(out2, "wb") as output2, os.fdopen(err2, "wb") as error2:
+                        try:
+                            process = subprocess.Popen(spawned, cwd=cwd, pass_fds=tuple(copies.values()),
+                                                       stdin=subprocess.PIPE, stdout=output2, stderr=error2,
+                                                       start_new_session=True, umask=0o077,
+                                                       env={**clients.boundary_spawn_env(plan, clients.static_env(chosen)),
+                                                            **run_env, **profile.env, **plan.env})
+                        finally:
+                            boundary.close(copies)
+                        clients.own_group(process)
+                        try:
+                            process.communicate(input=b"", timeout=timeout_seconds)
+                            timed_out, signals = False, []
+                        except subprocess.TimeoutExpired:
+                            timed_out = True
+                            signals = _stop_group(process)
+                    group = clients.drain_group(process, signals)
+                    seal(directory / clients.REPAIR_RECORD, {
+                        "kind": "read-repair", "reason": reason, "argv": repair_argv,
+                        "envelope_sha256": hashlib.sha256(repair_envelope).hexdigest(),
+                        "first_events_sha256": first_answer, "pid": process.pid, "exit_code": process.poll(),
+                        "ended_at": datetime.now(timezone.utc).isoformat(), "timed_out": timed_out})
             except BaseException as exc:
                 signals = _stop_group(process) if process is not None else []
                 group = clients.drain_group(process, signals)
@@ -782,6 +857,11 @@ def run_assignment(repo: RepoIdentity, store: Store, owner: OwnerRef, assignment
                    launch.get("script_launcher", {}).get("sha256") != hashlib.sha256(launcher).hexdigest():
                     raise DomainError("UNKNOWN_EVIDENCE", "Script launcher changed during the run")
             terminal = early or chosen.terminal(directory, launch)
+            if terminal.facts.get("answer_error"):   # V6: the last answer (after the repair round, if any)
+                raise DomainError("UNKNOWN_EVIDENCE", "Read-mode stream invalid: " + terminal.facts["answer_error"])
+            if read and terminal.facts.get("repair"):
+                extras["repair_sha256"] = _sha256_file(directory / clients.REPAIR_RECORD)
+                extras["repair_events_sha256"] = _sha256_file(directory / clients.REPAIR_STREAM)
             if terminal.stop is not None and not _story(profile.name):   # design D25: a story-profile fact only
                 raise DomainError("UNKNOWN_EVIDENCE", "the client stopped at its turn limit "
                                   f"({terminal.stop.get('num_turns')} turns) without a return")

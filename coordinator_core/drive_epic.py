@@ -168,8 +168,11 @@ def _check_overrides(template: dict, stories: dict, bounds: RunBounds, finished=
     for key, over in stories.items():
         if (over.get("roles") or over.get("budgets")) and key not in finished:
             try:
-                _bounds_check(fill_template(template, SAMPLE["__FEATURE__"], key, over.get("roles"),
-                                            budgets=over.get("budgets")), bounds)
+                filled = fill_template(template, SAMPLE["__FEATURE__"], key, over.get("roles"),
+                                       budgets=over.get("budgets"))
+                _bounds_check(filled, bounds)
+                if over.get("roles"):   # Copilot reviewer design V8: a read-mode reviewer set at a start or a restart
+                    drive_pipeline.check_read_reviews(filled)
             except Refusal as exc:
                 raise Refusal(exc.code, f"Story {key}: {exc.message}", exc.extra["reason"],
                               exc.extra.get("action")) from None

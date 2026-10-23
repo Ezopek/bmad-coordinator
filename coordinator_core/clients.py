@@ -736,11 +736,13 @@ READ_RECORD_TYPES = frozenset({
     # seen by the qualification runs of 2026-10-23 (project history, 2026-10-23-copilot-read): the model's reasoning
     # and the CLI's own workspace index status; neither is a tool call
     "assistant.reasoning", "assistant.reasoning_delta", "session.indexed_search"})
-# Per version, the profiles qualified and their parser contract. 1.0.91, the judgment, 2026-10-23 (project history,
-# 2026-10-23-copilot-read/qualification-report): P3 confinement, P4 a judgment, P6 replay. A review profile needs its
-# own gate (P1 spec review, P2 code review) before it may run unqualified-free; the planning review has none yet.
+# Per version, the profiles qualified and their parser contract (project history, 2026-10-23-copilot-read). 1.0.91,
+# the judgment: P3 confinement, P4 a judgment, P6 replay. 1.0.102, the spec review (P1, through the repair round) and
+# the code review (P2, a retained live stream passing every check under this parser); the judgment is not yet
+# qualified on 1.0.102 (its P4 run is pending the operator's budget). The planning review has no gate yet.
 READ_PROFILES = ("judgment", "spec-review", "code-review")
-READ_QUALIFIED: dict[str, dict[str, str]] = {"1.0.91": {"judgment": READ_CONTRACT}}
+READ_QUALIFIED: dict[str, dict[str, str]] = {"1.0.91": {"judgment": READ_CONTRACT},
+                                            "1.0.102": {"spec-review": READ_CONTRACT, "code-review": READ_CONTRACT}}
 QUALIFY_ENV = "COORDINATOR_QUALIFY_READ"
 
 
@@ -803,98 +805,160 @@ def _read_answer(text: object) -> bytes:
 
 
 def _unique_keys(pairs: list) -> dict:
-    """A JSON object read one way by every reader: a repeated key is refused, never resolved to the last one."""
-    keys = [key for key, _ in pairs]
-    if len(keys) != len(set(keys)):
-        raise ValueError("the final answer repeats a key")
-    return dict(pairs)
+    """A JSON object read one way by every reader: a repeated key is refused unless every repetition carries the same
+    value (then every reader agrees), never resolved to the last one. The 2026-10-23 code review qualification repeated
+    `lens` in every finding, each time with the same value."""
+    value = {}
+    for key, item in pairs:
+        if key in value and value[key] != item:
+            raise ValueError("the final answer repeats a key")
+        value[key] = item
+    return value
 
 
 def _no_constant(name: str):
     raise ValueError(f"the final answer holds {name}, which is not JSON")
 
 
+REPAIR_STREAM = "events-repair.jsonl"   # Copilot reviewer design §10 R1: the one repair round's own stream
+REPAIR_ENVELOPE = "envelope-repair.json"
+REPAIR_RECORD = "repair.json"
+
+
+def _read_stream(seen: list, session: str, cwd: Path, staged: set, dirs: set, bound: dict, reads: dict) -> dict:
+    """V5 over one retained stream: only the contract's record types; one `result`, last, exit 0, the preset session;
+    a recognised usage checkpoint offering exactly view, grep and glob; every tool start one of them with paths that
+    name staged files or directories (never the cwd itself but to list it, nor .git); every completion answering a
+    start; nothing attributed to a subagent; every MCP server disabled. `reads` gains each staged file a successful
+    `view` returned in full (a later partial view never undoes a full one). The final root answer is returned raw."""
+    unknown_types = sorted({item["type"] for item in seen} - READ_RECORD_TYPES)
+    if unknown_types:
+        raise ValueError("record types outside the read contract: " + ", ".join(unknown_types))
+    if [index for index, item in enumerate(seen) if item["type"] == "result"] != [len(seen) - 1]:
+        raise ValueError("stream lacks exactly one result as its last record")
+    result = seen[-1]
+    if result.get("sessionId") != session or type(result.get("exitCode")) is not int or result["exitCode"] != 0:
+        raise ValueError("the result names another session or a non-zero exit")
+    offered, starts, answer = None, {}, None
+    for item in seen:
+        data = item.get("data") if isinstance(item.get("data"), dict) else {}
+        if "parentToolCallId" in data or "agentId" in data:
+            raise ValueError("a record is attributed to a subagent")
+        kind = item["type"]
+        if kind == "session.usage_checkpoint":
+            offered = _read_tools_offered(data)
+            if offered is None:
+                raise ValueError("the usage checkpoint has a shape the read contract does not know")
+        elif kind == "session.mcp_servers_loaded":
+            servers = data.get("servers") if isinstance(data.get("servers"), list) else []
+            if any(not isinstance(server, dict) or server.get("status") != "disabled" for server in servers):
+                raise ValueError("an MCP server was loaded")
+        elif kind == "tool.execution_start":
+            name, arguments = data.get("toolName"), data.get("arguments")
+            arguments = arguments if isinstance(arguments, dict) else {}
+            # grep names its targets `paths` (one or several), as the 2026-10-23 review qualification showed
+            raw = arguments.get("paths") if name == "grep" and "path" not in arguments else arguments.get("path")
+            targets = [raw] if isinstance(raw, str) else raw if isinstance(raw, list) else []
+            if name not in READ_TOOLS or not targets or any(not isinstance(item, str) or not item for item in targets):
+                raise ValueError(f"a tool call outside the read set or without a path: {name}")
+            for path in targets:
+                full = Path(os.path.normpath(path if os.path.isabs(path) else cwd / path))
+                relative = full.relative_to(cwd).as_posix() if full.is_relative_to(cwd) else None
+                if relative is None or (relative not in staged and relative not in dirs and
+                                        not (relative == "." and name == "view")):   # a listing of the cwd
+                    raise ValueError(f"a tool call reads outside the staged inputs: {path}")
+            starts[data.get("toolCallId")] = (name, relative if len(targets) == 1 else None, arguments)
+        elif kind == "tool.execution_complete":
+            call = starts.get(data.get("toolCallId"))
+            if call is None:
+                raise ValueError("a tool completion answers no start")
+            content = (data.get("result") or {}).get("content") if isinstance(data.get("result"), dict) else None
+            if call[0] == "view" and call[1] in staged and data.get("success") is True and isinstance(content, str):
+                if not (call[1] in bound and reads.get(call[1]) == bound[call[1]]):   # a full read is kept
+                    reads[call[1]] = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        elif kind == "assistant.message":
+            if data.get("toolRequests"):
+                continue
+            if data.get("chunkCount") not in (None, 1) or data.get("phase") is not None:
+                raise ValueError("a phased or chunked answer is outside the read contract")
+            answer = data.get("content")
+    if offered != set(READ_TOOLS):
+        raise ValueError("the offered tools were not observed as exactly view, grep and glob")
+    return {"tools": sorted({call[0] for call in starts.values()}), "answer": answer,
+            "usage": result.get("usage") if isinstance(result.get("usage"), dict) else None}
+
+
 def _copilot_read_terminal(run_dir: Path, launch: dict) -> Terminal:
-    """V5, V6 over the retained stream: only the contract's record types; one `result`, last, exit 0, the preset
-    session; a recognised usage checkpoint offering exactly view, grep and glob; every tool start one of them with a
-    path that names a staged file or a staged directory (never the cwd itself or .git), every completion answering
-    a start, nothing attributed to a subagent, every MCP server disabled; the final root answer one JSON object.
-    `facts["reads"]` maps each staged file a successful `view` returned in full to that content's sha256."""
+    """V5, V6 over the retained stream, and over the repair round's stream when one is retained (§10 R1): the stream
+    rules hold for each, the reads of both count, and the answer is the last stream's. An answer that is not one JSON
+    object (V6) does not fail the stream: `final` is empty and `facts["answer_error"]` says why, so the runner can
+    repair once and replay can tell the two apart."""
     try:
-        seen = jsonl_records(run_dir / "events.jsonl")
-        session = launch.get("session_id")
-        cwd = Path(launch.get("cwd") or "")
-        staged = set(launch.get("read_paths") or [])
-        if not isinstance(session, str) or not cwd.is_absolute():
-            raise ValueError("launch receipt lacks the preset session or the cwd")
-        unknown_types = sorted({item["type"] for item in seen} - READ_RECORD_TYPES)
-        if unknown_types:
-            raise ValueError("record types outside the read contract: " + ", ".join(unknown_types))
-        if [index for index, item in enumerate(seen) if item["type"] == "result"] != [len(seen) - 1]:
-            raise ValueError("stream lacks exactly one result as its last record")
-        result = seen[-1]
-        if result.get("sessionId") != session or type(result.get("exitCode")) is not int or result["exitCode"] != 0:
-            raise ValueError("the result names another session or a non-zero exit")
-        offered, starts, reads, answer = None, {}, {}, None
-        bound = launch.get("read_digests") or {}   # a review's bound digests: a later partial view never undoes one
-        dirs = {str(parent) for path in staged for parent in Path(path).parents if str(parent) != "."}
-        for item in seen:
-            data = item.get("data") if isinstance(item.get("data"), dict) else {}
-            if "parentToolCallId" in data or "agentId" in data:
-                raise ValueError("a record is attributed to a subagent")
-            kind = item["type"]
-            if kind == "session.usage_checkpoint":
-                offered = _read_tools_offered(data)
-                if offered is None:
-                    raise ValueError("the usage checkpoint has a shape the read contract does not know")
-            elif kind == "session.mcp_servers_loaded":
-                servers = data.get("servers") if isinstance(data.get("servers"), list) else []
-                if any(not isinstance(server, dict) or server.get("status") != "disabled" for server in servers):
-                    raise ValueError("an MCP server was loaded")
-            elif kind == "tool.execution_start":
-                name, arguments = data.get("toolName"), data.get("arguments")
-                arguments = arguments if isinstance(arguments, dict) else {}
-                # grep names its targets `paths` (one or several), as the 2026-10-23 review qualification showed
-                raw = arguments.get("paths") if name == "grep" and "path" not in arguments else arguments.get("path")
-                targets = [raw] if isinstance(raw, str) else raw if isinstance(raw, list) else []
-                if name not in READ_TOOLS or not targets or any(not isinstance(item, str) or not item
-                                                                for item in targets):
-                    raise ValueError(f"a tool call outside the read set or without a path: {name}")
-                for path in targets:
-                    full = Path(os.path.normpath(path if os.path.isabs(path) else cwd / path))
-                    relative = full.relative_to(cwd).as_posix() if full.is_relative_to(cwd) else None
-                    if relative is None or (relative not in staged and relative not in dirs and
-                                            not (relative == "." and name == "view")):   # a listing of the cwd
-                        raise ValueError(f"a tool call reads outside the staged inputs: {path}")
-                starts[data.get("toolCallId")] = (name, relative if len(targets) == 1 else None, arguments)
-            elif kind == "tool.execution_complete":
-                call = starts.get(data.get("toolCallId"))
-                if call is None:
-                    raise ValueError("a tool completion answers no start")
-                content = (data.get("result") or {}).get("content") if isinstance(data.get("result"), dict) else None
-                if call[0] == "view" and call[1] in staged and data.get("success") is True and isinstance(content, str):
-                    if not (call[1] in bound and reads.get(call[1]) == bound[call[1]]):   # a full read is kept
-                        reads[call[1]] = hashlib.sha256(content.encode("utf-8")).hexdigest()
-            elif kind == "assistant.message":
-                if data.get("toolRequests"):
-                    continue
-                if data.get("chunkCount") not in (None, 1) or data.get("phase") is not None:
-                    raise ValueError("a phased or chunked answer is outside the read contract")
-                answer = data.get("content")
-        if offered != set(READ_TOOLS):
-            raise ValueError("the offered tools were not observed as exactly view, grep and glob")
-        final = _read_answer(answer)
+        session, streams, reads, final, answer_error = _read_streams(run_dir, launch)
         _copilot_fresh(run_dir, launch, session)   # section 14: one fresh session of the per-run home, no $HOME leak
         session_usage = json.loads((run_dir / "freshness.json").read_bytes()).get("session_usage")
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise _unknown(f"Read-mode stream invalid: {exc}") from exc
-    usage = result.get("usage") if isinstance(result.get("usage"), dict) else None
-    facts = {"read_contract": READ_CONTRACT, "offered_tools": sorted(offered),
-             "tools": sorted({call[0] for call in starts.values()}), "reads": dict(sorted(reads.items())),
-             "usage": usage}
+    facts = {"read_contract": READ_CONTRACT, "offered_tools": sorted(READ_TOOLS),
+             "tools": sorted(set().union(*[stream["tools"] for stream in streams])), "reads": dict(sorted(reads.items())),
+             "usage": streams[-1]["usage"], "repair": len(streams) > 1}
+    if len(streams) > 1:
+        facts["first_usage"] = streams[0]["usage"]
+    if answer_error is not None:
+        facts["answer_error"] = answer_error
     if isinstance(session_usage, dict):   # bill design B2, from the sealed observation
         facts["session_usage"] = session_usage
     return Terminal(session, final, facts)
+
+
+def _read_streams(run_dir: Path, launch: dict) -> tuple:
+    """The retained stream and, when present, the repair round's, each under the stream rules; the reads of both;
+    the last answer as JSON bytes, or empty with the reason it is not one JSON object. ValueError on a stream defect."""
+    session = launch.get("session_id")
+    cwd = Path(launch.get("cwd") or "")
+    staged = set(launch.get("read_paths") or [])
+    if not isinstance(session, str) or not cwd.is_absolute():
+        raise ValueError("launch receipt lacks the preset session or the cwd")
+    bound = launch.get("read_digests") or {}   # a review's bound digests: a later partial view never undoes one
+    dirs = {str(parent) for path in staged for parent in Path(path).parents if str(parent) != "."}
+    reads: dict = {}
+    streams = [_read_stream(jsonl_records(run_dir / "events.jsonl"), session, cwd, staged, dirs, bound, reads)]
+    if (run_dir / REPAIR_STREAM).exists():
+        streams.append(_read_stream(jsonl_records(run_dir / REPAIR_STREAM), session, cwd, staged, dirs, bound, reads))
+    try:
+        return session, streams, reads, _read_answer(streams[-1]["answer"]), None
+    except ValueError as exc:
+        return session, streams, reads, b"", str(exc)
+
+
+def read_answer(run_dir: Path, launch: dict) -> tuple[bytes, dict, str | None]:
+    """§10 R1, before the repair round and before the observation: the answer so far, the reads so far and the
+    answer's defect, if any. A stream defect is UNKNOWN_EVIDENCE: nothing to repair."""
+    try:
+        _, _, reads, final, answer_error = _read_streams(run_dir, launch)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise _unknown(f"Read-mode stream invalid: {exc}") from exc
+    return final, reads, answer_error
+
+
+def read_repair_argv(spec: LaunchSpec, session: str) -> list[str]:
+    """§10 R1: the one repair round resumes the run's own session (its state in the per-run COPILOT_HOME) with the
+    refusal as its prompt, under the same isolation, tools, log directory and cwd."""
+    return [spec.binary, "--resume", session, "-p", ENVELOPE_ARG, "--output-format", "json", "--model", spec.model,
+            *COPILOT_ISOLATION, "--available-tools", ",".join(READ_TOOLS),
+            "--log-dir", str(spec.run_dir / "copilot-logs"), "-C", str(spec.worktree)]
+
+
+def read_repair_envelope(reason: str, schema: dict, ids: dict) -> dict:
+    """The repair prompt: the exact refusal, the full return schema again, and the one-object rule."""
+    from .worker import return_schema_text   # lazy: worker imports this module
+    return {"kind": "coordinator-read-repair", "format": 1, "refused": reason,
+            "instructions": "Your final message was refused for the reason in `refused`. Fix exactly that and answer "
+                            "again: the whole corrected return as your final message, one JSON object from `{` to "
+                            "`}` with no sentence before or after it. If the reason names a file you did not read in "
+                            "full, view it whole first (pass forceReadLargeFiles for a large file). You still have "
+                            "only view, grep and glob over the same staged inputs. There is no further round. "
+                            + return_schema_text(schema, ids)}
 
 
 def _copilot_argv(spec: LaunchSpec) -> list[str]:
@@ -2101,6 +2165,8 @@ def run_isolated(client: str, target: RepoIdentity, root: Path, cwd: Path, recei
         terminal = chosen.terminal(receipt_dir, launch)
         if terminal.stop is not None:   # design D25: an isolated run saves nothing; a stop is unknown
             raise _unknown(STOPPED)
+        if terminal.facts.get("answer_error"):   # V6: the judgment has no repair round (§10 R1)
+            raise _unknown("Read-mode stream invalid: " + terminal.facts["answer_error"])
         if chosen.return_source == "stdout" or mode == "read":   # V6: the read mode's return is the final answer
             private_file(receipt_dir / "last.json", terminal.final)
         elif chosen.return_source != "client-file":
