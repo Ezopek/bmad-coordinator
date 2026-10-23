@@ -738,11 +738,12 @@ READ_RECORD_TYPES = frozenset({
     "assistant.reasoning", "assistant.reasoning_delta", "session.indexed_search"})
 # Per version, the profiles qualified and their parser contract (project history, 2026-10-23-copilot-read). 1.0.91,
 # the judgment: P3 confinement, P4 a judgment, P6 replay. 1.0.102, the spec review (P1, through the repair round) and
-# the code review (P2, a retained live stream passing every check under this parser); the judgment is not yet
-# qualified on 1.0.102 (its P4 run is pending the operator's budget). The planning review has no gate yet.
+# the code review (P2, a retained live stream passing every check under this parser) and the judgment (P4, with
+# replay). The planning review has no gate yet.
 READ_PROFILES = ("judgment", "spec-review", "code-review")
-READ_QUALIFIED: dict[str, dict[str, str]] = {"1.0.91": {"judgment": READ_CONTRACT},
-                                            "1.0.102": {"spec-review": READ_CONTRACT, "code-review": READ_CONTRACT}}
+READ_QUALIFIED: dict[str, dict[str, str]] = {
+    "1.0.91": {"judgment": READ_CONTRACT},
+    "1.0.102": {"judgment": READ_CONTRACT, "spec-review": READ_CONTRACT, "code-review": READ_CONTRACT}}
 QUALIFY_ENV = "COORDINATOR_QUALIFY_READ"
 
 

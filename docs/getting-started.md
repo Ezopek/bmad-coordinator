@@ -16,7 +16,7 @@ This page takes you from nothing to a finished epic on the bundled example, then
 | --- | --- | --- | --- |
 | Claude Code (`claude-code`) | `claude -p` | worker, spec author, reviewer, judgment | `max_turns` per role is its own turn limit (one turn is one model response, however many tool calls it holds). Live with 2.1.289 to 2.1.303. |
 | Codex CLI (`codex-cli`) | `codex exec` | worker, spec author, reviewer, judgment | Runs in its `workspace-write` sandbox; network only with `web: true` on the worker role. Live with 0.160 to 0.163. |
-| GitHub Copilot CLI (`copilot`) | `copilot -p` | worker, spec author; judgment and spec or code review in read mode | Needs a `model` the account can use and a logged-in `copilot` or `COPILOT_GITHUB_TOKEN`. As judge or reviewer it runs only inside the [launch boundary](#run-the-workers-in-a-sandbox) with `"mode": "read"`, on a CLI version qualified for that profile (judgment 1.0.91; spec and code review 1.0.102). |
+| GitHub Copilot CLI (`copilot`) | `copilot -p` | worker, spec author; judgment and spec or code review in read mode | Needs a `model` the account can use and a logged-in `copilot` or `COPILOT_GITHUB_TOKEN`. As judge or reviewer it runs only inside the [launch boundary](#run-the-workers-in-a-sandbox) with `"mode": "read"`, on a CLI version qualified for that profile (1.0.102 for all three; the judgment on 1.0.91 too). |
 
 `doctor --client NAME` resolves the binary and runs `--version`, nothing more: it tells you the client is there, not that it is logged in. Run one prompt by hand (`claude -p 'reply with ok'`, `codex exec 'reply with ok'`) before the first drive.
 
