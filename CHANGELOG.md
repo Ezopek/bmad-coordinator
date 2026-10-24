@@ -4,6 +4,7 @@ Dates, with one tag: `v0.1.0` marks the first public release (2026-10-20, the en
 
 ## 2026-10-24
 
+- D28: the files a story brief tells the worker to read first, the project's `rules` and the spec's (or, for the spec author, the project's) `context` paths, are sealed as the assignment's contract files: present at prepare, current at reserve, unchanged at return, protected from the worker's writes.
 - D27: a story worker's return that the coordinator refuses after the scope checks (the JSON outside the schema, or the profile refusing it, as in F18, F21, F22 and F25) is no longer an `unknown` attempt for the operator to resolve. It is the client stop `invalid-return`, committed and continued like a turn-limit stop, with the refusal quoted in the continuation brief and counted in `max_updates`. Scope and integrity violations, timeouts, non-zero exits and refused reviewer or judgment returns stay `unknown`.
 - The planning review in read mode ([design](docs/copilot-reviewer-design.md) §10 R4): a `reviewer` role or `bmad review prepare` in read mode now takes a planning bundle too. The prepare stages the sealed artifacts and dependencies (read in full) and the review skill's own contract files, overrides and config layers (read as needed, never resolved), and the brief names the lenses. The profile `planning-review` passed its qualification on Copilot CLI 1.0.102 (a seeded contradiction with an authority input, found as critical; replay agreed), so every read-mode profile is qualified on the installed CLI.
 

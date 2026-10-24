@@ -132,7 +132,7 @@ class ClaudeClientTests(Harness):
         on a story feature added from a committed spec; returns (story repo, assignment id, report)."""
         spec_path = "_bmad-output/implementation-artifacts/spec-1-1-greeting.md"
         for rel, text in ((spec_path, SPEC), ("pkg/__init__.py", ""), ("tests/__init__.py", ""),
-                          ("tests/test_base.py", BASE_TEST)):
+                          ("tests/test_base.py", BASE_TEST), ("docs/house-rules.md", "House rules.\n")):   # D28
             (self.main / rel).parent.mkdir(parents=True, exist_ok=True)
             (self.main / rel).write_text(text)
         git(self.main, "add", "-A")

@@ -487,7 +487,9 @@ class PrepareTests(StoryCase):
         for key in ("fingerprint_sha256", "contract", "compat_decision_id"):
             self.assertNotIn(key, binding)
         row = next(item for item in self.store.read_snapshot()["assignments"] if item["id"] == prepared["assignment_id"])
-        self.assertEqual(("[]", hashlib.sha256(b"[]").hexdigest()), (row["contract_files_json"], row["contract_digest"]))
+        contracts = json.loads(row["contract_files_json"])   # design D28: the spec's context file, sealed
+        self.assertEqual(["docs/house-rules.md"], [item["path"] for item in contracts])
+        self.assertEqual(hashlib.sha256(canonical(contracts)).hexdigest(), row["contract_digest"])
         custom = {**PROJECT, "briefs_dir": "docs/briefs"}
         found = self.prep(key="i2", project=custom)
         self.assertEqual("docs/briefs/i2.md", found["brief_ref"])
@@ -683,9 +685,16 @@ class PrepareTests(StoryCase):
 
     def test_outside_scope_delete_is_refused(self):
         first = self.prep()["assignment_id"]
-        report = self.run_story(first, [("pkg/greet.py", "x\n")], deleted=["docs/house-rules.md"], changed_paths=["pkg/greet.py"])
+        report = self.run_story(first, [("pkg/greet.py", "x\n")], deleted=["AGENTS.md"], changed_paths=["pkg/greet.py"])
         self.assertEqual("unknown", report.state)
         self.assertIn("exceed scope", report.evidence_needs[0])
+
+    def test_a_changed_read_first_file_is_refused_as_immutable(self):
+        """Design D28: the spec's context file is a contract file, so its deletion is the immutable-input refusal."""
+        first = self.prep()["assignment_id"]
+        report = self.run_story(first, [("pkg/greet.py", "x\n")], deleted=["docs/house-rules.md"], changed_paths=["pkg/greet.py"])
+        self.assertEqual("unknown", report.state)
+        self.assertIn("Immutable source or contract bytes changed", report.evidence_needs[0])
 
     def test_needs_decision_requires_the_question_aggregate_and_records_questions(self):
         first = self.prep()["assignment_id"]
@@ -1345,13 +1354,14 @@ class CodeReviewTests(StoryCase):
         self.assertNotIn("passed on that commit", brief)
 
     def test_code_review_prepare_needs_no_contract_refuses_a_compat_decision_and_its_gate_skips_the_fingerprint(self):
-        """Design D22: a commit-bound bundle is reviewed without discover, drift check or contract files; its binding
+        """Design D22: a commit-bound bundle is reviewed without discover, drift check or BMAD contract; its binding
         seals no fingerprint, and the review gate checks the bundle, never the installation."""
         assignment, commit = self.attempt()
         bundle = impl.bundle_for_commit(self.story_repo, self.store, self.owner, self.fid, assignment)
         row = self.coordinator.detail("bundle", bundle["id"])
         manifest = bundles.read_manifest(Path(row["path"]), row["manifest_digest"])
-        self.assertEqual([], [item for item in manifest["files"] if item["kind"] == "contract"])
+        self.assertEqual(["docs/house-rules.md"],   # design D28: the read-first files, outside the review subject
+                         [item["path"] for item in manifest["files"] if item["kind"] == "contract"])
         caught = self.code("INVALID_INPUT", bmad_review.review_prepare, self.story_repo, self.store, self.owner,
                            bmad_review.ReviewPrepare(bundle["id"], "code-reviewer", "r0", "some-decision",
                                                      lenses=list(bmad_review.CODE_LENSES)))
@@ -1576,10 +1586,37 @@ class SpecAuthorTests(StoryCase):
         prepared = self.prep("i2", intent="update", update_of=assignment, continues_stop=True)
         self.assertIn(json.dumps(stop["reason"]), (self.story_path / prepared["brief_ref"]).read_text())
 
+    def test_read_first_files_are_sealed_current_at_reserve_and_protected(self):
+        """Design D28: the project rules and the spec's context are the assignment's contract files: a change between
+        prepare and launch is STALE_INPUT at reserve, a worker's write to one ends the attempt unknown, a missing one
+        blocks the prepare, and the spec author seals the project's context instead."""
+        (self.main / "RULES.md").write_text("Rules.\n")
+        git(self.main, "add", "RULES.md")
+        git(self.main, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "rules")
+        (self.story_path / "RULES.md").write_text("Rules.\n")   # the linked worktree has its own copy
+        project = {**PROJECT, "rules": ["RULES.md"]}
+        prepared = self.prep("i1", project=project)
+        row = self.coordinator.detail("assignment", prepared["assignment_id"])
+        self.assertEqual(["RULES.md", "docs/house-rules.md"], [item["path"] for item in row["contract_files"]])
+        caught = self.code("BLOCKED_EVIDENCE", impl.prepare, self.story_repo, self.store, self.owner,
+                           impl.ImplementationPrepare(feature_id=self.fid, key="i2", author_id="story-worker",
+                                                      project={**PROJECT, "rules": ["MISSING.md"]}))
+        self.assertIn("MISSING.md", caught.message)
+        spec_row = self.coordinator.detail("assignment", self.prep_spec()["assignment_id"])
+        self.assertEqual(["docs/house-rules.md"], [item["path"] for item in spec_row["contract_files"]])
+        (self.story_path / "RULES.md").write_text("Rules, revised.\n")
+        self.code("STALE_INPUT", worker.run_assignment, self.story_repo, self.store, self.owner,
+                  prepared["assignment_id"], "fake-model", 5)
+        (self.story_path / "RULES.md").write_text("Rules.\n")
+        report = self.run_story(prepared["assignment_id"], [("pkg/greet.py", GREET), ("RULES.md", "hacked\n")],
+                                changed_paths=["pkg/greet.py"])   # last: a refused attempt fences the worktree
+        self.assertEqual("unknown", report.state)
+        self.assertIn("Immutable source or contract bytes changed", " ".join(report.evidence_needs))
+
     def test_a_scope_violation_stays_unknown(self):
         """D27 narrows nothing: a change outside the writable scopes is refused before the profile, as `unknown`."""
         assignment = self.prep()["assignment_id"]
-        report = self.run_story(assignment, [("pkg/greet.py", GREET), ("docs/house-rules.md", "changed\n")],
+        report = self.run_story(assignment, [("pkg/greet.py", GREET), ("README.md", "changed\n")],
                                 changed_paths=["pkg/greet.py"])
         self.assertEqual("unknown", report.state)
         self.assertIn("exceed scope", " ".join(report.evidence_needs))

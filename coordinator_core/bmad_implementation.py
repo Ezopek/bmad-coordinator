@@ -858,9 +858,28 @@ def _claude_commands(spec) -> list[str]:
     return sorted(found)
 
 
+def read_first_paths(project: dict, story: dict, author: bool) -> list[str]:
+    """Design D28: the files a story worker's brief tells it to read first, besides the spec: the project rules and,
+    for the implementation worker, the spec's context paths; for the spec author, the project's context paths."""
+    context = project.get("context", []) if author else \
+        [path.replace("{project-root}/", "") for path in story.get("context", [])]
+    return list(dict.fromkeys([*project.get("rules", []), *context]))
+
+
+def read_first_entries(worktree: Path, project: dict, story: dict, author: bool) -> list[dict]:
+    """Design D28: those files sealed as the assignment's contract files: current at reserve, unchanged at return,
+    and protected from the worker's writes. One that is not a regular file in the worktree blocks the prepare."""
+    paths = read_first_paths(project, story, author)
+    missing = [path for path in paths if not (worktree / path).is_file() or (worktree / path).is_symlink()]
+    if missing:
+        raise DomainError("BLOCKED_EVIDENCE", "A file the brief reads first is missing or not a regular file in the "
+                          "story worktree: " + ", ".join(missing))
+    return [_file_entry(worktree, path) for path in paths]
+
+
 def prepare(repo, store, owner, spec: ImplementationPrepare) -> dict:
     """brief -> create_assignment(required profile) -> seal -> bind; idempotent on key. Design D22: no discover, no
-    compatibility decision, no contract files. Design D24 (ruling R6): kind `spec` binds the spec author
+    compatibility decision; design D28: the read-first files (rules, context) as the contract files. Design D24 (ruling R6): kind `spec` binds the spec author
     (`bmad-spec-author-v1`, role `spec-author`) to the spec path alone, without commands, briefed by
     `bmad_spec_author.brief`; the spec is a sealed source once it exists."""
     _validate(spec)
@@ -915,6 +934,7 @@ def prepare(repo, store, owner, spec: ImplementationPrepare) -> dict:
     # continuation of an author stopped before it wrote one (final review I1); every other author update needs it
     spec_entry = None if author and (spec.intent == "create" or spec.continues_stop) and \
         not os.path.lexists(worktree / story["spec_path"]) else _file_entry(worktree, story["spec_path"])
+    contracts = read_first_entries(worktree, spec.project, story, author)   # design D28
     parent = _git(worktree, "rev-parse", "HEAD")
     shown = continuation and {"heading": continuation["heading"], "lines": continuation["lines"]}
     if author:
@@ -927,7 +947,7 @@ def prepare(repo, store, owner, spec: ImplementationPrepare) -> dict:
     from .model import AssignmentInput
     assignment_id = coordinator.create_assignment(owner, AssignmentInput(
         feature["id"], spec.key, brief_ref, feature["mandate_revision"], [brief] + ([spec_entry] if spec_entry else []),
-        [], hashlib.sha256(canonical([])).hexdigest(), list(scopes), "workspace-write", spec.author_id,
+        contracts, hashlib.sha256(canonical(contracts)).hexdigest(), list(scopes), "workspace-write", spec.author_id,
         [], [continuation["request"]] if continuation and continuation.get("request") else []),
         required_profile=profile)
     continues = continuation and {key: value for key, value in continuation.items() if key not in ("heading", "lines")}
