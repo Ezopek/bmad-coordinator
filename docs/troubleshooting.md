@@ -60,7 +60,9 @@ Fix it, then `epic resume` (or `drive resume`): setup and baseline run again. Th
 
 ### A killed or stalled attempt
 
-**`attempt-unknown`.** A worker, reviewer or judgment process ended without an observed return: killed (a second Ctrl-C, a reboot, an out-of-memory kill), timed out (the role's `timeout`), crashed, exited non-zero (a client that is not logged in), or returned something the schema refused. The attempt holds the feature's fence, so nothing of that feature launches until you resolve it:
+**`attempt-unknown`.** A worker, reviewer or judgment process ended without an observed return: killed (a second Ctrl-C, a reboot, an out-of-memory kill), timed out (the role's `timeout`), crashed, exited non-zero (a client that is not logged in), or, for a reviewer, judgment or generic worker, returned something the schema refused. The attempt holds the feature's fence, so nothing of that feature launches until you resolve it:
+
+A story worker whose return the coordinator refused for its content (the JSON outside the schema, open questions that do not name the spec's entries) is not this case since D27: the attempt ends `client-stopped` with `client_stop.kind: invalid-return`, is committed and continues with the refusal quoted in the next brief. `epic status` shows the reason under the story's `client_stop`.
 
 1. Read what happened: `worker inspect <assignment id>` (the `holder` in the summary's subjects) prints the state and `evidence_needs`; `.git/coordinator/runs/<run>/` has the launch record and the client's own output.
 2. Make sure nothing of it still runs. `attempt resolve` refuses while the recorded process, or any process whose command line holds the launch token, may still live; wait, or stop it.

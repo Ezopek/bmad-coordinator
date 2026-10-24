@@ -116,6 +116,26 @@ def _final(value, assignment, profile=profiles.GENERIC, read: bool = False):
     return value
 
 
+class InvalidReturn(Exception):
+    """Design D27: a sealed return the profile refuses after the scope and integrity checks passed: the worker's own
+    slip (shape, fields, a mismatch with the file it wrote), which a story continuation can fix."""
+
+
+def _invalid_return_stop(exc: Exception) -> dict:
+    return {"kind": "invalid-return", "reason": str(exc)[:1000]}
+
+
+def _refusal(final_bytes: bytes, assignment, profile, binding, directory, changed) -> str | None:
+    """Design D27 at replay: the reason the retained return is refused, recomputed; None when it stands."""
+    try:
+        profile.check(_final(json.loads(final_bytes), assignment, profile), assignment, binding, directory, changed)
+    except DomainError as exc:
+        return exc.message[:1000]
+    except ValueError as exc:
+        return str(exc)[:1000]
+    return None
+
+
 def _stop_final(assignment, stop: dict) -> dict:
     """Design D25: the coordinator's record of a client stop: no worker field, the stop as the client reported it."""
     return {"assignment_id": assignment["id"], "request_fingerprint": assignment["request_fingerprint"],
@@ -345,7 +365,11 @@ def _return_evidence(repo, assignment, directory, before, after, final, thread, 
                    or path in protected or not any(scope_covers(scope, path) for scope in allowed)
                    or not _scope_allows(path, feature_scopes)]
         found = implementation.git_delta(repo.worktree, binding["base_commit"], allowed)
-        seal(directory / "git-delta.json", found)
+        if (directory / "git-delta.json").exists():   # design D27: the stop's pass after a refused return
+            if json.loads((directory / "git-delta.json").read_bytes()) != found:
+                raise ValueError("git delta changed between the return and its stop")   # a coordinator fault, not a rule
+        else:
+            seal(directory / "git-delta.json", found)
         # Controller ruling (task 2): a symlink or other non-regular file, and a mode-only change, are refused.
         irregular = [path for path in changed if path in after and after[path].kind != "file"]
         mode_only = [path for path in changed if path in before and path in after and
@@ -384,7 +408,13 @@ def _return_evidence(repo, assignment, directory, before, after, final, thread, 
              "ended_at": datetime.now(timezone.utc).isoformat(), **(extras or {})}
     if profile is not profiles.GENERIC:
         value["profile"] = profile.name
-        value["profile_payload"] = None if stopped else profile.check(final, assignment, binding, directory, changed)
+        try:
+            value["profile_payload"] = None if stopped else profile.check(final, assignment, binding, directory,
+                                                                           changed)
+        except DomainError as exc:   # design D27: a profile refusal after the scope checks is the worker's slip
+            if exc.code != "UNKNOWN_EVIDENCE" or not _story(profile.name):
+                raise
+            raise InvalidReturn(exc.message) from exc
     if stopped:
         value["client_stop"] = final["client_stop"]
     receipt_digest = seal(directory / "return.json", value)
@@ -500,9 +530,17 @@ def _validated_receipt(repo, store, assignment, directory, historical=False):
             client, "read" if read else assignment["permission_mode"], terminal, web=launch.get("web") is True)):
         raise DomainError("UNKNOWN_EVIDENCE", "Client facts differ from the retained client output")
     if stopped:   # design D25: no final message, no profile payload; the stop and its fixed fields are re-derived
-        expected = _stop_final(assignment, terminal.stop)
-        if terminal.stop is None or terminal.stop != value.get("client_stop") or last != b"" or \
-           value.get("profile_payload") is not None or not _story(profile.name) or value.get("claimed_paths") != [] or \
+        stop = value.get("client_stop") or {}
+        if stop.get("kind") == "invalid-return":   # design D27: the retained return, refused again for the same reason
+            if terminal.stop is not None or last != terminal.final or read or stop.get("reason") != _refusal(
+                    last, assignment, profile, binding, directory, [item["path"] for item in value["changed_paths"]]):
+                raise DomainError("UNKNOWN_EVIDENCE", "Invalid-return stop differs from the retained client output")
+            expected = _stop_final(assignment, stop)
+        else:
+            expected = _stop_final(assignment, terminal.stop)
+            if terminal.stop is None or terminal.stop != stop or last != b"":
+                raise DomainError("UNKNOWN_EVIDENCE", "Stop receipt differs from the retained client output")
+        if value.get("profile_payload") is not None or not _story(profile.name) or value.get("claimed_paths") != [] or \
            any(value.get(key) != expected[key] for key in
                ("checks", "descendants", "unresolved_question", "options", "affected_ids")):
             raise DomainError("UNKNOWN_EVIDENCE", "Stop receipt differs from the retained client output")
@@ -873,16 +911,28 @@ def run_assignment(repo: RepoIdentity, store: Store, owner: OwnerRef, assignment
             last = (directory / "last.json").read_bytes()
             if last != terminal.final:
                 raise DomainError("UNKNOWN_EVIDENCE", "Final message differs from the client terminal")
-            final = _stop_final(assignment, terminal.stop) if terminal.stop is not None else \
-                _final(json.loads(last), assignment, profile, read)
-            if read:
-                final = _observed_reads(final, binding, terminal.facts.get("reads", {}))
             facts = clients.client_facts(chosen, spec.mode, terminal, web=spec.web)
             if facts:
                 extras["client_facts"] = facts
-            event = _return_evidence(repo, assignment, directory, before, after, final, terminal.thread_id,
-                                     process.returncode, profile, binding,
-                                     json.loads(feature["writable_paths_json"]), chosen, extras)
+            try:
+                final = _stop_final(assignment, terminal.stop) if terminal.stop is not None else \
+                    _final(json.loads(last), assignment, profile, read)
+                if read:
+                    final = _observed_reads(final, binding, terminal.facts.get("reads", {}))
+                event = _return_evidence(repo, assignment, directory, before, after, final, terminal.thread_id,
+                                         process.returncode, profile, binding,
+                                         json.loads(feature["writable_paths_json"]), chosen, extras)
+            except (InvalidReturn, DomainError) as exc:
+                # design D27: a story worker's refused return (its JSON, or the profile after the scope checks) is
+                # a client stop of its own, committed and continued, never an operator's resolve
+                story = _story(profile.name) and terminal.stop is None and not read
+                if not story or (isinstance(exc, DomainError) and not (
+                        exc.code == "UNKNOWN_EVIDENCE" and exc.message.startswith("Worker final JSON"))):
+                    raise
+                final = _stop_final(assignment, _invalid_return_stop(exc))
+                event = _return_evidence(repo, assignment, directory, before, after, final, terminal.thread_id,
+                                         process.returncode, profile, binding,
+                                         json.loads(feature["writable_paths_json"]), chosen, extras)
             if not qualified:   # V1: a qualification run passes every check and is never anchored nor observed
                 return _report(assignment_id, "unknown", directory, [
                     "qualification run: every check passed; never observed (Copilot reviewer design V1)"])

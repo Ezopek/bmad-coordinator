@@ -1508,8 +1508,8 @@ class SpecAuthorTests(StoryCase):
         report = self.run_spec(mismatched, [(SPEC_PATH, spec_text)],
                                result="needs-decision", questions=["Strip whitespace from the name?"], options=["strip", "keep"],
                                open_questions=[])
-        self.assertEqual("unknown", report.state)
-        self.assertIn("open_questions", " ".join(report.evidence_needs))
+        self.assertEqual("client-stopped", report.state, report.evidence_needs)   # design D27
+        self.assertIn("open_questions", self.coordinator.detail("assignment", mismatched)["return"]["client_stop"]["reason"])
 
     def test_a_return_that_rewords_an_entry_still_names_it_and_the_record_keeps_the_file(self):
         # design §7 F18, F21, F22 and F25: the return drops code marks, ends with a full stop, or loses a word; the
@@ -1535,22 +1535,56 @@ class SpecAuthorTests(StoryCase):
                            "recommendation": "keep"}], payload["open_questions"])
 
     def refused_spec(self, entries, asked=1):
-        """F25's limits: a refused attempt fences the worktree, so each refusal is its own test."""
+        """F25's limits, as design D27 records them: the refused return is the client stop `invalid-return`, committed
+        and replayable, its reason in the stop; the next prepare continues the story with the reason in its brief."""
         assignment = self.prep_spec()["assignment_id"]
         report = self.run_spec(assignment, [(SPEC_PATH, SPEC_WITH_QUESTION)], result="needs-decision",
                                questions=["q"] * asked, options=["strip", "keep"], open_questions=entries)
-        self.assertEqual("unknown", report.state)
-        self.assertIn("differ from the spec", " ".join(report.evidence_needs))
+        self.assertEqual("client-stopped", report.state, report.evidence_needs)
+        row = self.coordinator.detail("assignment", assignment)
+        stop = row["return"]["client_stop"]
+        self.assertEqual("invalid-return", stop["kind"])
+        self.assertIn("differ from the spec", stop["reason"])
+        self.assertEqual("client-stopped", worker.inspect_run(self.epic_repo, self.store, assignment).state)
+        impl.commit_attempt(self.epic_repo, self.store, self.owner, self.epic_feature(), assignment, PROJECT)
+        prepared = self.prep_spec(key="s2", intent="update", update_of=assignment, continues_stop=True)
+        brief = (self.epic_path / prepared["brief_ref"]).read_text()
+        self.assertIn("## Continuation after a client stop", brief)
+        self.assertIn("the coordinator refused its return: " + json.dumps(stop["reason"]), brief)
 
     OPTIONS = [{"label": "strip", "consequence": "c"}, {"label": "keep", "consequence": "c"}]
 
-    def test_a_return_with_another_id_is_unknown(self):
+    def test_a_return_with_another_id_is_an_invalid_return_stop(self):
         self.refused_spec([{"id": "Q2", "question": "q", "options": self.OPTIONS, "recommendation": "keep"}])
 
-    def test_a_return_with_another_number_of_options_is_unknown(self):
+    def test_a_return_with_another_number_of_options_is_an_invalid_return_stop(self):
         self.refused_spec([{"id": "Q1", "question": "q", "options": self.OPTIONS[:1], "recommendation": "strip"}])
 
-    def test_a_return_whose_aggregate_asks_another_number_of_questions_is_unknown(self):
+    def test_an_implementation_return_outside_the_profile_shape_is_an_invalid_return_stop(self):
+        """Design D27 for the implementation profile: the worker's `verification` is not a list, so the profile
+        refuses the return after the scope checks; the attempt is committed and continued, not resolved by hand."""
+        assignment = self.prep()["assignment_id"]
+        files = [("pkg/greet.py", GREET), ("tests/test_greet.py", TEST)]
+        report = self.run_story(assignment, files, changed_paths=[path for path, _ in files], verification="ran it")
+        self.assertEqual("client-stopped", report.state, report.evidence_needs)
+        stop = self.coordinator.detail("assignment", assignment)["return"]["client_stop"]
+        self.assertEqual("invalid-return", stop["kind"])
+        replayed = worker.inspect_run(self.story_repo, self.store, assignment)   # before the worktree moves on
+        self.assertEqual("client-stopped", replayed.state, replayed.evidence_needs)
+        commit = impl.commit_attempt(self.story_repo, self.store, self.owner, self.feature(), assignment, PROJECT)
+        self.assertTrue(commit.get("sha"))   # the work is kept
+        prepared = self.prep("i2", intent="update", update_of=assignment, continues_stop=True)
+        self.assertIn(json.dumps(stop["reason"]), (self.story_path / prepared["brief_ref"]).read_text())
+
+    def test_a_scope_violation_stays_unknown(self):
+        """D27 narrows nothing: a change outside the writable scopes is refused before the profile, as `unknown`."""
+        assignment = self.prep()["assignment_id"]
+        report = self.run_story(assignment, [("pkg/greet.py", GREET), ("docs/house-rules.md", "changed\n")],
+                                changed_paths=["pkg/greet.py"])
+        self.assertEqual("unknown", report.state)
+        self.assertIn("exceed scope", " ".join(report.evidence_needs))
+
+    def test_a_return_whose_aggregate_asks_another_number_of_questions_is_an_invalid_return_stop(self):
         self.refused_spec([{"id": "Q1", "question": "q", "options": self.OPTIONS, "recommendation": "keep"}], asked=2)
 
     def test_spec_author_completed_return_commits_the_spec_file_only_and_bundles_it(self):

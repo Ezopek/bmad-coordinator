@@ -660,9 +660,12 @@ def _continuation(spec, snapshot, feature, earlier, store, repo, worktree) -> di
         else:
             task = "finish what this brief asks for (the remaining Tasks & Acceptance items)"
         task += " and return" if spec.kind == "spec" else ", run the verification and return"
-        lines = [f"- Earlier assignment: `{earlier['id']}`",
+        ended = (f"- The earlier session returned, but the coordinator refused its return: "
+                 f"{json.dumps(stop.get('reason'))}. Fix exactly that in your own return; {where}."
+                 if stop.get("kind") == "invalid-return" else   # design D27
                  f"- The earlier session ended at the client's turn limit ({json.dumps(stop.get('kind'))}, "
-                 f"{json.dumps(stop.get('num_turns'))} turns) without returning; {where}.",
+                 f"{json.dumps(stop.get('num_turns'))} turns) without returning; {where}.")
+        lines = [f"- Earlier assignment: `{earlier['id']}`", ended,
                  f"Continue from the worktree as it stands: {task} within the turn budget; if the work cannot fit, "
                  "return `needs-decision` with one question starting with `BLOCKED:` that says what remains.",
                  *(carried["lines"] if carried else [])]
