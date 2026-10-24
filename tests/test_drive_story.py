@@ -1020,6 +1020,25 @@ class ClientStopTests(StoryDriveCase):
         self.assertEqual({**dict.fromkeys(STORY_CRITERIA, "pass"), "deferred-recorded": "trivial"},   # no deferred item
                          self.story_checks(summary))
 
+    def test_consecutive_client_failures_stop_at_their_budget(self):
+        """Design D29: two attempts in a row exit 1 without a return; each is a client-failure stop, committed and
+        continued, and the second reaches the default budget, so the story stops client-failure."""
+        self.scenario(steps={"impl-1": {"mode": "exit-1"}, "impl-2": {"mode": "exit-1"}})
+        summary, code = self.run_story(value=self.claude_pipeline())
+        self.assertEqual((11, "client-failure", {"worker": 2}, 2),
+                         (code, summary["reason"], summary["counts"]["launches"], summary["subjects"]["failures"]), summary)
+        self.assertEqual(("client-failure", "exit"), (summary["subjects"]["client_stop"]["kind"],
+                                                       summary["subjects"]["client_stop"]["cause"]))
+        self.assertIsNone(drive_pipeline.fence_holder(self.snapshot(), self.fid))
+        self.assertIn("client (login, quota", summary["operator_action"])
+        self.scenario(steps={"impl-1": {"mode": "exit-1"}, "impl-2": {"mode": "exit-1"},
+                             "impl-3": {"mode": "exit-1"}})
+        value = self.claude_pipeline(budgets={"max_updates": 4, "max_judgments": 8, "max_corrections": 3,
+                                              "client_failures": 1})
+        self.assertEqual(1, drive_pipeline.validate(value)["budgets"]["client_failures"])
+        self.code("INVALID_INPUT", drive_pipeline.validate, self.claude_pipeline(budgets={
+            "max_updates": 4, "max_judgments": 8, "client_failures": 9}))
+
     def test_a_second_stop_with_the_update_budget_spent_stops_update_budget(self):
         self.scenario(steps={"impl-1": {"mode": "max-turns", "files": [["pkg/greet.py", GREET]]},
                              "impl-2": {"mode": "max-turns", "files": [["tests/test_greet.py", TEST]]}})

@@ -64,6 +64,8 @@ Fix it, then `epic resume` (or `drive resume`): setup and baseline run again. Th
 
 A story worker whose return the coordinator refused for its content (the JSON outside the schema, open questions that do not name the spec's entries) is not this case since D27: the attempt ends `client-stopped` with `client_stop.kind: invalid-return`, is committed and continues with the refusal quoted in the next brief. `epic status` shows the reason under the story's `client_stop`.
 
+Nor is a story worker the coordinator itself stopped at the role's `timeout`, or whose process exited non-zero (a client not logged in, a quota refusal, a crash), while the process group ended and the integrity record was clean (D29): the attempt ends `client-stopped` with `client_stop.kind: client-failure`, is committed and continues. After `client_failures` such stops in a row (default 2) the story stops `client-failure`: check the client, then `drive resume` or `epic resume` tries once more.
+
 1. Read what happened: `worker inspect <assignment id>` (the `holder` in the summary's subjects) prints the state and `evidence_needs`; `.git/coordinator/runs/<run>/` has the launch record and the client's own output.
 2. Make sure nothing of it still runs. `attempt resolve` refuses while the recorded process, or any process whose command line holds the launch token, may still live; wait, or stop it.
 3. `attempt resolve <id> --confirm-unknown --token-file <token>` with `{"reason": "...", "source_ref": "..."}` on stdin, while no driver runs. It seals the evidence and records an operator-reported decision; files the process left in the worktree stay there, unclaimed.

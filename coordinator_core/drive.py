@@ -214,6 +214,12 @@ def _drive_action(outcome: str, reason: str | None, subjects: dict) -> str | Non
         return (f"fix the project status file ({subjects.get('detail')}) in the story worktree without committing "
                 "it, then drive resume (the status step edits and commits it); or release --token-file "
                 f"{TOKEN} and finish the story attended")
+    if reason == "client-failure":   # design D29
+        return (f"the worker of assignment {subjects.get('assignment_id')} ended without a return "
+                f"{subjects.get('failures')} times in a row (timeouts or crashes; the attempts are committed): check "
+                "the client (login, quota, the model, the role's timeout), then drive resume to try once more; or "
+                "raise budgets.client_failures in a pipeline bound to a new mandate revision (release --token-file "
+                f"{TOKEN} first); or release and finish the story attended")
     if reason == "correction-budget":
         return ("the red verify receipt of the attempt commit is final, so a plain drive resume stops here again: fix "
                 "the failing verification by hand in the story worktree and commit nothing yourself; then " +

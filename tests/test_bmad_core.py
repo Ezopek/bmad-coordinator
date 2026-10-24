@@ -50,6 +50,8 @@ mode = os.environ.get('FAKE_MODE', 'completed')
 if mode == 'sleep':
     time.sleep(30)
     sys.exit(0)
+if mode == 'exit-1':   # design D29: a client that fails before any return
+    sys.exit(1)
 if os.environ.get('FAKE_ENV_OUT'):
     pathlib.Path(os.environ['FAKE_ENV_OUT']).write_text(os.environ.get('BMAD_TEST', 'absent'))
 claimed = []

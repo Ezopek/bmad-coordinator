@@ -397,7 +397,7 @@ def _loop_action(reason: str, subjects: dict, epic_id: str) -> str | None:
 
 # Ruling H10: the terminal story stops `--restart` follows; any other stop is answered (an inbox decision, an accept).
 RESTARTABLE = ("critical-finding", "open-high-findings", "correction-budget", "update-budget", "worker-blocked",
-               "attempt-resolved", "cost-budget")
+               "attempt-resolved", "cost-budget", "client-failure")   # design D29
 
 
 def _story_epic_action(outcome: Outcome, story: dict | None, epic_id: str, from_story: bool = False) -> str | None:

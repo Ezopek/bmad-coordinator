@@ -33,6 +33,8 @@ OUT_OF_SLICE = frozenset({"branch", "branches", "loop", "epics", "sprint_status"
 MAX_UPDATES = 8
 MAX_JUDGMENTS = 8
 MAX_CORRECTIONS = 6
+MAX_CLIENT_FAILURES = 4   # design D29
+DEFAULT_CLIENT_FAILURES = 2
 PLANNING_MAX_CORRECTIONS = 4   # a planning pipeline validates as before the implementation drive
 MAX_TIMEOUT = 86400
 MAX_TURNS = 1000   # design D25: a role's turn limit
@@ -342,11 +344,15 @@ def validate(value) -> dict:
         raise _invalid("Pipeline roles must include worker and name only worker, reviewer and judgment")
     for name, role in roles.items():
         _role(name, role)
-    _keys(value["budgets"], ("max_updates", "max_judgments"), ("max_corrections", "max_cost_usd"),
+    _keys(value["budgets"], ("max_updates", "max_judgments"), ("max_corrections", "max_cost_usd", "client_failures"),
           "Pipeline budgets")
     cost_bound(value["budgets"].get("max_cost_usd"), roles, "max_cost_usd")
     _integer(value["budgets"]["max_updates"], 0, MAX_UPDATES, "max_updates")
     _integer(value["budgets"]["max_judgments"], 0, MAX_JUDGMENTS, "max_judgments")
+    if "client_failures" in value["budgets"]:   # design D29: absent means the default, and the digest stays
+        _integer(value["budgets"]["client_failures"], 0, MAX_CLIENT_FAILURES, "client_failures")
+        if "project" not in value:
+            raise _invalid("client_failures is a story budget")
     cap = (MAX_CORRECTIONS, "story") if "project" in value else (PLANNING_MAX_CORRECTIONS, "planning")
     corrections = value["budgets"].get("max_corrections", 0)
     if type(corrections) is not int or not 0 <= corrections <= cap[0]:
@@ -795,8 +801,8 @@ def _judgment_state(sid, sha, request, facts, value, subjects, kind="author", st
     mine = [item for item in judged.values() if item["request_id"] == request["id"]]
     if not mine:
         prefix = f"drv-{sha[:12]}-"
-        used = sum(1 for item in judged.values()  # max_judgments counts every launch
-                   if item["key"].startswith(prefix) and item["state"] != "failed-preflight")
+        used = sum(1 for item in judged.values()  # design D30: max_judgments counts this step's launches
+                   if item["key"].startswith(f"{prefix}{sid}-j") and item["state"] != "failed-preflight")
         if used >= value["budgets"]["max_judgments"]:
             return StepState(sid, kind, "needs-human", "judgment-budget", None, subjects)
         n = 1 + sum(1 for item in judged.values() if item["key"].startswith(f"{prefix}{sid}-j"))
@@ -1171,6 +1177,17 @@ def _story_corrections(bound, facts) -> int:
                                          for key in ("corrects_review", "corrects_verify")))
 
 
+def _client_failures(bound) -> int:
+    """Design D29: the step's consecutive attempts that ended in a client failure, newest first."""
+    count = 0
+    for row in reversed(bound):
+        stop = (json.loads(row["return_json"]) if row["return_json"] else {}).get("client_stop") or {}
+        if row["state"] != "client-stopped" or stop.get("kind") != "client-failure":
+            break
+        count += 1
+    return count
+
+
 def _story_updates(bound, facts) -> int:
     return sum(1 for row in bound if facts["bindings"][row["id"]].get("intent") == "update" and
                not any((facts["bindings"][row["id"]].get("continues") or {}).get(key)
@@ -1293,6 +1310,9 @@ def _implement_head(step, sid, snapshot, facts, bound, key, value, subjects, fea
             return StepState(sid, kind, "ready", None, {"kind": "commit", "assignment_id": head["id"]}, subjects)
         subjects = {**subjects, "commit_sha": commit.get("sha"), "empty": bool(commit.get("empty")),
                     "client_stop": ret.get("client_stop")}
+        failures = _client_failures(bound)   # design D29: consecutive failures of this step, bounded
+        if failures and failures >= value["budgets"].get("client_failures", DEFAULT_CLIENT_FAILURES):
+            return StepState(sid, kind, "needs-human", "client-failure", None, {**subjects, "failures": failures})
         if _story_updates(bound, facts) >= value["budgets"]["max_updates"]:
             return StepState(sid, kind, "needs-human", "update-budget", None, subjects)
         return prepare("update", update_of=head["id"], continues_stop=True)

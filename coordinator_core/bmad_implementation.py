@@ -663,6 +663,11 @@ def _continuation(spec, snapshot, feature, earlier, store, repo, worktree) -> di
         ended = (f"- The earlier session returned, but the coordinator refused its return: "
                  f"{json.dumps(stop.get('reason'))}. Fix exactly that in your own return; {where}."
                  if stop.get("kind") == "invalid-return" else   # design D27
+                 (f"- The earlier session ended without returning: " +
+                  (f"the coordinator stopped it at the role's time box ({json.dumps(stop.get('timeout_seconds'))} s)"
+                   if stop.get("cause") == "timeout" else
+                   f"its process exited with code {json.dumps(stop.get('exit_code'))}") + f"; {where}.")
+                 if stop.get("kind") == "client-failure" else   # design D29
                  f"- The earlier session ended at the client's turn limit ({json.dumps(stop.get('kind'))}, "
                  f"{json.dumps(stop.get('num_turns'))} turns) without returning; {where}.")
         lines = [f"- Earlier assignment: `{earlier['id']}`", ended,

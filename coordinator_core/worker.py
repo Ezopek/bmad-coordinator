@@ -136,6 +136,16 @@ def _refusal(final_bytes: bytes, assignment, profile, binding, directory, change
     return None
 
 
+def _failure_stop(cause: str, process, signals: list, timeout_seconds: int) -> dict:
+    """Design D29: the coordinator's own observation of a client that ended without a return: it killed the group
+    at the role's time box, or the process exited non-zero without a client stop; the group is drained and the
+    integrity record clean in either case, else the attempt stays unknown."""
+    stop = {"kind": "client-failure", "cause": cause, "exit_code": process.poll(), "signals": list(signals)}
+    if cause == "timeout":
+        stop["timeout_seconds"] = timeout_seconds
+    return stop
+
+
 def _stop_final(assignment, stop: dict) -> dict:
     """Design D25: the coordinator's record of a client stop: no worker field, the stop as the client reported it."""
     return {"assignment_id": assignment["id"], "request_fingerprint": assignment["request_fingerprint"],
@@ -506,9 +516,30 @@ def _validated_receipt(repo, store, assignment, directory, historical=False):
     if client.observation_name is not None and \
        _sha256_file(directory / client.observation_name) != value.get("observation_sha256"):
         raise DomainError("UNKNOWN_EVIDENCE", "Sealed client observation differs from the receipt")
-    if client.return_source == "worker-file" and not read and \
+    failed = stopped and (value.get("client_stop") or {}).get("kind") == "client-failure"   # design D29
+    if client.return_source == "worker-file" and not read and not failed and \
        clients.worker_return_sha256(directory) != value.get("worker_return_sha256"):
         raise DomainError("UNKNOWN_EVIDENCE", "Retained worker return differs from the receipt")
+    if failed:   # design D29: the stop is the coordinator's observation: the end record, the retained bytes
+        stop = value["client_stop"]
+        last = (directory / "last.json").read_bytes()
+        try:
+            end = json.loads((directory / "end.json").read_bytes())
+        except (OSError, ValueError) as exc:
+            raise DomainError("UNKNOWN_EVIDENCE", "Failure stop has no end record") from exc
+        expected = _stop_final(assignment, stop)
+        if _sha256_file(directory / "events.jsonl") != value["events_sha256"] or \
+           hashlib.sha256(last).hexdigest() != value["last_sha256"] or \
+           stop.get("cause") not in ("timeout", "exit") or stop.get("exit_code") != end.get("exit_code") or \
+           value.get("exit_code") != end.get("exit_code") or \
+           (stop["cause"] == "timeout") != (end.get("timed_out") is True) or \
+           (stop["cause"] == "exit" and end.get("exit_code") == 0) or \
+           value.get("thread_id") != "process" or value.get("profile_payload") is not None or \
+           not _story(profile.name) or value.get("claimed_paths") != [] or \
+           any(value.get(key) != expected[key] for key in
+               ("checks", "descendants", "unresolved_question", "options", "affected_ids")):
+            raise DomainError("UNKNOWN_EVIDENCE", "Failure stop differs from the retained process evidence")
+        return event
     if "script_launcher" in launch:  # the sealed post-run launcher check (fix round 2, I2)
         check = directory / clients.LAUNCHER_CHECK
         if _sha256_file(check) != value.get("launcher_check_sha256") or not clients.launcher_intact(
@@ -871,8 +902,11 @@ def run_assignment(repo: RepoIdentity, store: Store, owner: OwnerRef, assignment
                     return _report(assignment_id, "unknown", directory, ["launch or process evidence interrupted"])
                 raise
         clean = _integrity(repo, directory, baseline, group, git_before, state_before)
+        failure = None   # design D29: a story attempt the coordinator saw end without a return
         if timed_out:
-            return _report(assignment_id, "unknown", directory, ["timeout; descendants and hooks may remain"])
+            if not (_story(profile.name) and not read and clean and group.get("group_terminated")):
+                return _report(assignment_id, "unknown", directory, ["timeout; descendants and hooks may remain"])
+            failure = _failure_stop("timeout", process, signals, timeout_seconds)
         if not clean:
             return _report(assignment_id, "unknown", directory,
                            ["sealed evidence or the worktree's Git metadata (config, hooks, attributes, exclude, the "
@@ -883,7 +917,14 @@ def run_assignment(repo: RepoIdentity, store: Store, owner: OwnerRef, assignment
             if read and delta(cwd_before, inventory(read_cwd)):   # V5: nothing was written
                 raise DomainError("UNKNOWN_EVIDENCE", "The read-mode run changed its staged inputs")
             # design D25: after a non-zero exit only a client stop, read from the stream, goes on
-            early = clients.exited_terminal(chosen, directory, launch) if process.returncode != 0 else None
+            early = None
+            if process.returncode != 0 and failure is None:
+                try:
+                    early = clients.exited_terminal(chosen, directory, launch)
+                except DomainError:   # design D29: a story attempt's crash or refused client is a failure stop
+                    if not (_story(profile.name) and not read and group.get("group_terminated")):
+                        raise
+                    failure = _failure_stop("exit", process, signals, timeout_seconds)
             extras = {}
             if chosen.observe is not None:
                 extras["observation_sha256"] = seal(directory / chosen.observation_name,
@@ -894,6 +935,16 @@ def run_assignment(repo: RepoIdentity, store: Store, owner: OwnerRef, assignment
                 if not clients.launcher_intact(state, hashlib.sha256(launcher).hexdigest()) or \
                    launch.get("script_launcher", {}).get("sha256") != hashlib.sha256(launcher).hexdigest():
                     raise DomainError("UNKNOWN_EVIDENCE", "Script launcher changed during the run")
+            if failure is not None:   # design D29: no terminal; the stop is sealed under the return's own checks
+                if not os.path.lexists(directory / "last.json"):
+                    private_file(directory / "last.json", b"")
+                final = _stop_final(assignment, failure)
+                event = _return_evidence(repo, assignment, directory, before, after, final, "process",
+                                         process.returncode, profile, binding,
+                                         json.loads(feature["writable_paths_json"]), chosen, extras)
+                observed.anchor_return(owner, assignment_id, event)
+                observed.record_return(owner, assignment_id, event)
+                return _report(assignment_id, STATE_OF[final["result"]], directory)
             terminal = early or chosen.terminal(directory, launch)
             if terminal.facts.get("answer_error"):   # V6: the last answer (after the repair round, if any)
                 raise DomainError("UNKNOWN_EVIDENCE", "Read-mode stream invalid: " + terminal.facts["answer_error"])

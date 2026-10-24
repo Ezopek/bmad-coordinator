@@ -1613,6 +1613,38 @@ class SpecAuthorTests(StoryCase):
         self.assertEqual("unknown", report.state)
         self.assertIn("Immutable source or contract bytes changed", " ".join(report.evidence_needs))
 
+    def test_a_timeout_the_coordinator_enforced_is_a_client_failure_stop(self):
+        """Design D29: the fake sleeps past the role's time box; the coordinator kills the group, the integrity record
+        is clean, and the attempt is the client stop client-failure (cause timeout), committed and continued."""
+        assignment = self.prep()["assignment_id"]
+        with patch.dict(os.environ, {**self.env, "FAKE_MODE": "sleep", "FAKE_WRITE": "[]"}):
+            report = worker.run_assignment(self.story_repo, self.store, self.owner, assignment, "fake-model", 1)
+        self.assertEqual("client-stopped", report.state, report.evidence_needs)
+        stop = self.coordinator.detail("assignment", assignment)["return"]["client_stop"]
+        self.assertEqual(("client-failure", "timeout", 1), (stop["kind"], stop["cause"], stop["timeout_seconds"]))
+        replayed = worker.inspect_run(self.story_repo, self.store, assignment)
+        self.assertEqual("client-stopped", replayed.state, replayed.evidence_needs)
+        commit = impl.commit_attempt(self.story_repo, self.store, self.owner, self.feature(), assignment, PROJECT)
+        self.assertTrue(commit.get("empty"))   # it wrote nothing
+        prepared = self.prep("i2", intent="update", update_of=assignment, continues_stop=True)
+        brief = (self.story_path / prepared["brief_ref"]).read_text()
+        self.assertIn("ended without returning: the coordinator stopped it at the role's time box (1 s)", brief)
+
+    def test_a_non_zero_exit_without_a_client_stop_is_a_client_failure_stop(self):
+        assignment = self.prep()["assignment_id"]
+        with patch.dict(os.environ, {**self.env, "FAKE_MODE": "exit-1", "FAKE_WRITE": "[]"}):
+            report = worker.run_assignment(self.story_repo, self.store, self.owner, assignment, "fake-model", 5)
+        self.assertEqual("client-stopped", report.state, report.evidence_needs)
+        stop = self.coordinator.detail("assignment", assignment)["return"]["client_stop"]
+        self.assertEqual(("client-failure", "exit", 1), (stop["kind"], stop["cause"], stop["exit_code"]))
+        self.assertEqual("client-stopped", worker.inspect_run(self.story_repo, self.store, assignment).state)
+        run = Path(report.run_dir)
+        sealed = json.loads((run / "return.json").read_text())
+        forged = {**sealed, "client_stop": {**stop, "cause": "timeout"}}
+        (run / "return.json").chmod(0o600)
+        (run / "return.json").write_bytes(json.dumps(forged, sort_keys=True, separators=(",", ":")).encode())
+        self.assertEqual("unknown", worker.inspect_run(self.story_repo, self.store, assignment).state)
+
     def test_a_scope_violation_stays_unknown(self):
         """D27 narrows nothing: a change outside the writable scopes is refused before the profile, as `unknown`."""
         assignment = self.prep()["assignment_id"]

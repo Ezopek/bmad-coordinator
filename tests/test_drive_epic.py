@@ -1441,7 +1441,7 @@ class EpicStopTests(EpicDriveCase):
         epic scorer (F17) reads the resolution as an intervention."""
         self.one_story()
         self.scenario(stories=self.story_scenarios(**{"1-2-farewell": {"impl-1": {"status": "blocked",
-                                                                                     "mode": "exit-1"}}}))
+                                                                                     "mode": "truncated"}}}))   # D29: an exit is a stop; a broken stream is still unknown
         code, summary, _ = self.epic_start(code=11)
         self.assertEqual(("needs-human", "attempt-unknown"), (summary["outcome"], summary["reason"]), summary)
         holder, feature_id = summary["subjects"]["holder"], summary["story"]["feature_id"]
