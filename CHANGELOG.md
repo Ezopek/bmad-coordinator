@@ -4,7 +4,7 @@ Dates, with one tag: `v0.1.0` marks the first public release (2026-10-20, the en
 
 ## 2026-10-24
 
-- The planning review in read mode ([design](docs/copilot-reviewer-design.md) §10 R4): a `reviewer` role or `bmad review prepare` in read mode now takes a planning bundle too. The prepare stages the sealed artifacts and dependencies (read in full) and the review skill's own contract files, overrides and config layers (read as needed, never resolved), and the brief names the lenses. The profile `planning-review` has its own qualification gate, not yet passed on any version, so a pipeline with a read-mode planning review is refused at its start until then.
+- The planning review in read mode ([design](docs/copilot-reviewer-design.md) §10 R4): a `reviewer` role or `bmad review prepare` in read mode now takes a planning bundle too. The prepare stages the sealed artifacts and dependencies (read in full) and the review skill's own contract files, overrides and config layers (read as needed, never resolved), and the brief names the lenses. The profile `planning-review` passed its qualification on Copilot CLI 1.0.102 (a seeded contradiction with an authority input, found as critical; replay agreed), so every read-mode profile is qualified on the installed CLI.
 
 ## 2026-10-23
 
