@@ -2,6 +2,10 @@
 
 Dates, with one tag: `v0.1.0` marks the first public release (2026-10-20, the entry below, published as the single-root history of this repository); the installed package carries a `package_revision` digest, not a version. Each entry names the design document (under `docs/`) whose decisions it implements; the document's status line records the evidence.
 
+## 2026-10-24
+
+- The planning review in read mode ([design](docs/copilot-reviewer-design.md) §10 R4): a `reviewer` role or `bmad review prepare` in read mode now takes a planning bundle too. The prepare stages the sealed artifacts and dependencies (read in full) and the review skill's own contract files, overrides and config layers (read as needed, never resolved), and the brief names the lenses. The profile `planning-review` has its own qualification gate, not yet passed on any version, so a pipeline with a read-mode planning review is refused at its start until then.
+
 ## 2026-10-23
 
 - The read mode's repair round and two parser relaxations ([design](docs/copilot-reviewer-design.md) §10 R1 to R3): a read-mode review whose first answer is refused for something a second answer can fix (prose around the JSON, a missing field, a required file not read in full, a review-profile refusal) resumes its own session once, under the same sandbox and tools, with the exact refusal as its prompt; the repair's stream, envelope and record are sealed and checked at replay, and there is no third round. A repeated JSON key with equal values is one reading. A finding located by a staged alias is recorded by its manifest path. With these, the spec review (live, through the repair round) and the code review (a retained live stream under the final parser) are qualified on Copilot CLI 1.0.102; the judgment, qualified on 1.0.91, passed its run on 1.0.102 too, so all three read-mode profiles are qualified on the installed CLI.

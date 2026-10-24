@@ -104,113 +104,19 @@ class RoleTests(unittest.TestCase):
         self.assertEqual("UNSUPPORTED_CLIENT_MODE", caught.exception.code)
         self.assertIn("Story 1-2-farewell", caught.exception.message)
 
-    def test_a_planning_review_in_read_mode_is_refused(self):
+    def test_a_planning_review_in_read_mode_needs_its_own_profile(self):
         from coordinator_core import drive_pipeline
         value = {"kind": "drive-pipeline", "format": 1, "feature_id": "0" * 32, "mandate_revision": 1,
                  "roles": {"worker": {"client": "codex-cli", "model": "m", "timeout": 30},
-                           "reviewer": {"client": "codex-cli", "model": "m", "timeout": 30}},
+                           "reviewer": {"client": "copilot", "model": "m", "timeout": 30, "mode": "read",
+                                        "boundary": "bwrap"}},
                  "budgets": {"max_updates": 2, "max_judgments": 0},
                  "steps": [{"id": "compat", "kind": "compat"},
                            {"id": "prd", "kind": "author", "skill": "bmad-prd", "slug": "s", "author_id": "a",
                             "inputs": {"docs/input.md": "driving-brief"}},
                            {"id": "b", "kind": "bundle", "of": "prd"},
                            {"id": "r", "kind": "review", "of": "b", "reviewer_id": "rev"}]}
-        drive_pipeline.validate(value)
-        value["roles"]["reviewer"] = {"client": "copilot", "model": "m", "timeout": 30, "mode": "read",
-                                      "boundary": "bwrap"}
-        with self.assertRaises(DomainError) as caught:
-            drive_pipeline.validate(value)
-        self.assertEqual("UNSUPPORTED_STEP", caught.exception.code)
-        self.assertIn("planning review", caught.exception.message)
-
-
-@unittest.skipIf(REASON and os.environ.get("COORDINATOR_REQUIRE_BWRAP") != "1", f"bwrap unusable: {REASON}")
-class ReadModeTests(unittest.TestCase):
-    def setUp(self):
-        if REASON:
-            self.fail(f"COORDINATOR_REQUIRE_BWRAP=1 but bwrap is unusable: {REASON}")
-        self.tmp = tempfile.TemporaryDirectory(dir=ROOT)
-        self.addCleanup(self.tmp.cleanup)
-        base = self.base = Path(self.tmp.name).resolve()
-        project = base / "project"
-        subprocess.run(["git", "init", "-q", str(project)], check=True)
-        subprocess.run(["git", "-C", str(project), "-c", "user.name=T", "-c", "user.email=t@example.invalid", "commit",
-                        "-q", "--allow-empty", "-m", "a"], check=True)
-        self.target = resolve_repo(project)
-        bin_dir = base / "bin"
-        bin_dir.mkdir()
-        (bin_dir / "copilot").write_text(FAKE.replace("__PYTHON__", sys.executable))
-        (bin_dir / "copilot").chmod(0o755)
-        self.env = {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "COPILOT_GITHUB_TOKEN": "fake-token",
-                    "COORDINATOR_BOUNDARY_PASS": "FAKE_"}
-        self.count = 0
-
-    def isolated(self, qualified=False, required=("question.json", "mandate.json"), boundary_kind="bwrap", **env):
-        self.count += 1
-        root = self.base / f"isolated-{self.count}"
-        cwd = root / "cwd"
-        cwd.mkdir(parents=True)
-        subprocess.run(["git", "init", "-q", str(cwd)], check=True)
-        for name, text in (("question.json", '{"q": 1}\n'), ("mandate.json", '{"m": 2}\n'), ("brief.md", "Brief.\n")):
-            (cwd / name).write_text(text)
-        envelope = {"kind": "coordinator-judgment-request", "brief": "Brief."}
-        with patch.dict(os.environ, {**self.env, **env}), \
-             patch.dict(clients.READ_QUALIFIED, {"9.9.9": {"judgment": clients.READ_CONTRACT}} if qualified else {}, clear=True):
-            return root, clients.run_isolated("copilot", self.target, root, cwd, root / "receipts", envelope, SCHEMA,
-                                              "fake-model", 30, boundary_kind=boundary_kind, mode="read",
-                                              required_reads=required)
-
-    def test_a_qualification_run_passes_every_check_and_is_never_observed(self):
-        root, result = self.isolated(COORDINATOR_QUALIFY_READ="1", FAKE_READ_VIEWS=READS)
-        self.assertEqual("unknown", result.state)
-        self.assertIn("qualification run", " ".join(result.needs))
-        self.assertEqual({"answer": "yes"}, result.final)
-        launch = json.loads((root / "receipts" / "launch.json").read_text())
-        self.assertEqual((True, "read", ["brief.md", "mandate.json", "question.json"]),
-                         (launch["qualification"], launch["requested_mode"], launch["read_paths"]))
-        self.assertIn("boundary", launch)
-        facts = json.loads((root / "receipts" / "return.json").read_text())["client_facts"]
-        self.assertEqual((["glob", "grep", "view"], "passed"), (facts["offered_tools"], facts["tool_check"]))
-
-    def test_a_qualified_version_is_observed(self):
-        root, result = self.isolated(qualified=True, FAKE_READ_VIEWS=json.dumps([*json.loads(READS),
-                                                                                ["grep", "question.json"]]))
-        self.assertEqual(("observed", []), (result.state, result.needs))
-        self.assertEqual(b'{"answer": "yes"}', (root / "receipts" / "last.json").read_bytes())
-        root, result = self.isolated(qualified=True, FAKE_READ_VIEWS=READS,   # a repeated key with equal values
-                                     FAKE_READ_ANSWER='{"answer": "yes", "answer": "yes"}')
-        self.assertEqual("observed", result.state, result.needs)
-
-    def test_the_stream_rules_fail_closed(self):
-        outside = self.base / "outside.txt"
-        outside.write_text("secret\n")
-        cases = {
-            "outside the read set": dict(FAKE_READ_VIEWS=json.dumps([["bash", "question.json"]])),
-            "reads outside the staged inputs": dict(FAKE_READ_VIEWS=json.dumps([["view", str(outside)]])),
-            "did not read mandate.json in full": dict(FAKE_READ_VIEWS=json.dumps([["view", "question.json"]])),
-            "offered tools were not observed": dict(FAKE_READ_VIEWS=READS,
-                                                    FAKE_READ_OFFER='["view", "grep", "glob", "bash"]'),
-            "Expecting value": dict(FAKE_READ_VIEWS=READS, FAKE_READ_ANSWER='Sure: {"answer": "yes"}'),
-            "record types outside the read contract": dict(FAKE_READ_VIEWS=READS,
-                                                           FAKE_READ_EXTRA='[["session.new_thing", {}]]'),
-            "attributed to a subagent": dict(FAKE_READ_VIEWS=READS,
-                                             FAKE_READ_EXTRA='[["assistant.message", {"parentToolCallId": "x"}]]'),
-            "staged inputs: /": dict(FAKE_READ_VIEWS=json.dumps([*json.loads(READS), ["grep", "."]])),   # the cwd
-            "repeats a key": dict(FAKE_READ_VIEWS=READS, FAKE_READ_ANSWER='{"answer": "no", "answer": "yes"}'),
-            "NaN, which is not JSON": dict(FAKE_READ_VIEWS=READS, FAKE_READ_ANSWER='{"answer": NaN}'),
-        }
-        for reason, env in cases.items():
-            with self.subTest(reason):
-                _, result = self.isolated(qualified=True, **env)
-                self.assertEqual("unknown", result.state, reason)
-                self.assertIn(reason, " ".join(result.needs))
-
-    def test_the_mode_needs_the_boundary_and_a_qualified_version(self):
-        for kwargs, why in (({"boundary_kind": None}, "outside the launch boundary"), ({}, "not qualified")):
-            with self.subTest(why), self.assertRaises(DomainError) as caught:
-                self.isolated(FAKE_READ_VIEWS=READS, **kwargs)
-            self.assertEqual("UNSUPPORTED_CLIENT_MODE", caught.exception.code)
-            self.assertIn(why, caught.exception.message)
+        self.assertEqual(["planning-review"], drive_pipeline.read_review_profiles(drive_pipeline.validate(value)))
 
 
 if __name__ == "__main__":

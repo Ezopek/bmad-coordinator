@@ -16,7 +16,9 @@ from coordinator_core import bmad_review, clients, worker
 from coordinator_core.model import DomainError
 from coordinator_core.run_receipt import read_binding
 from coordinator_core.service import binding_anchor
+from tests.bmad_fixture import write
 from tests.test_bmad_implementation import GREET, PROJECT, SPEC_PATH, SPEC_READY, TEST, StoryCase
+from tests.test_bmad_review import ReviewCase
 from tests.test_boundary import REASON
 
 FAKE = r'''#!__PYTHON__
@@ -268,6 +270,56 @@ class ReadReviewTests(StoryCase):
                 bundle["id"], "code-reviewer", "r1", lenses=list(bmad_review.CODE_LENSES), client="copilot",
                 mode="read"))
         self.assertEqual("INVALID_INPUT", caught.exception.code)
+
+
+@unittest.skipIf(REASON and os.environ.get("COORDINATOR_REQUIRE_BWRAP") != "1", f"bwrap unusable: {REASON}")
+class ReadPlanningReviewTests(ReviewCase):
+    """V2's planning row: a planning bundle reviewed in read mode stages the sealed files and the review skill's own
+    contract files (never resolved, read as copies), and the review record is the ordinary one."""
+
+    def setUp(self):
+        if REASON:
+            self.fail(f"COORDINATOR_REQUIRE_BWRAP=1 but bwrap is unusable: {REASON}")
+        super().setUp()
+        (self.fake_dir / "copilot").write_text(FAKE.replace("__PYTHON__", sys.executable))
+        (self.fake_dir / "copilot").chmod(0o755)
+        patcher = patch.dict(os.environ, {"COPILOT_GITHUB_TOKEN": "fake-token", "COORDINATOR_BOUNDARY_PASS": "FAKE_"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        qualified = patch.dict(clients.READ_QUALIFIED, {"9.9.9": {"planning-review": clients.READ_CONTRACT}},
+                               clear=True)
+        qualified.start()
+        self.addCleanup(qualified.stop)
+
+    def test_a_planning_review_in_read_mode_stages_the_review_skill_and_is_recorded(self):
+        write(self.t.path, "_bmad/custom/bmad-review.toml", "[workflow]\n")   # an override, part of the contract
+        self.compat = self.judge()
+        self.authored()
+        bundle = self.bundled(dependency_paths=["docs/authority.md"])["id"]
+        prepared = self.prepared(bundle, client="copilot", boundary="bwrap", mode="read")
+        binding = self.binding_of_review(prepared["assignment_id"])
+        inputs = {item["path"]: (item["kind"], item["required"]) for item in binding["read_inputs"]}
+        self.assertEqual(("planning-review", ("dependency", True), ("contract", False), ("contract", False)),
+                         (binding["read_profile"], inputs["docs/authority.md"],
+                          inputs[".agents/skills/bmad-review/SKILL.md"], inputs["_bmad/custom/bmad-review.toml"]))
+        self.assertIn(".agents/skills/bmad-review/references/lens-adversarial.md", inputs)
+        self.assertFalse(any(path.startswith(".agents/skills/bmad-prd/") for path in inputs))
+        self.assertTrue(all(kind == "contract" or required for kind, required in inputs.values()))
+        brief = self.brief_of(prepared)
+        for text in ("## Read-mode inputs (your only files)", "resolve no customization yourself"):
+            self.assertIn(text, brief)
+        for text in ("sha256sum", "`bundle_read` holds", "sealed root:"):
+            self.assertNotIn(text, brief)
+        final = {key: value for key, value in self.final_for(prepared["assignment_id"]).items() if key != "bundle_read"}
+        final.update(changed_paths=[], checks=[], descendants=[], unresolved_question=None, options=[],
+                     affected_ids=[])
+        with patch.dict(os.environ, {"FAKE_READ_REVIEW": json.dumps(final), "FAKE_READ_REPAIR": json.dumps(final)}):
+            report = worker.run_assignment(self.t.repo, self.store, self.owner, prepared["assignment_id"],
+                                           "fake-model", 30)
+        self.assertEqual("completed-claim", report.state, report.evidence_needs)
+        self.assertEqual("observed", self.record(prepared["assignment_id"])["provenance_class"])
+        shutil.rmtree(Path(report.run_dir) / worker.READ_CWD)
+        self.assertEqual("completed-claim", worker.inspect_run(self.t.repo, self.store, prepared["assignment_id"]).state)
 
 
 if __name__ == "__main__":

@@ -141,7 +141,8 @@ def read_review_profiles(pipeline: dict) -> list[str]:
         return []
     steps = {step["id"]: step for step in pipeline["steps"]}
     heads = {_head(step["of"], steps)["kind"] for step in pipeline["steps"] if step["kind"] == "review"}
-    return sorted({"spec": "spec-review", "implement": "code-review"}[kind] for kind in heads & {"spec", "implement"})
+    return sorted({"spec": "spec-review", "implement": "code-review", "author": "planning-review"}[kind]
+                  for kind in heads & {"spec", "implement", "author"})
 
 
 def check_read_reviews(pipeline: dict) -> None:
@@ -393,10 +394,6 @@ def validate(value) -> dict:
                 raise _invalid(f"Step {step['of']} is taken by more than one step")
         kinds[sid] = step["kind"]
         seen[sid] = step
-    if roles.get("reviewer", {}).get("mode") == "read" and any(
-            step["kind"] == "review" and _head(step["of"], seen)["kind"] == "author" for step in steps):
-        raise _unsupported("The read mode for a planning review is not implemented yet; give the reviewer role to "
-                           "claude-code or codex-cli")   # Copilot reviewer design V2: spec and code reviews only
     named = {step["author_id"] for step in steps if step["kind"] in ("author", "spec", "implement")}
     if any(step["kind"] == "review" and step["reviewer_id"] in named for step in steps):
         raise _invalid("A reviewer must differ from every author of the pipeline")

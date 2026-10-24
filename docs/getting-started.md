@@ -131,7 +131,7 @@ Everything the quickstart made is under `$WORK`; `rm -rf "$WORK"` removes it all
           "judgment": {"client": "codex-cli", "model": "gpt-6-astra", "timeout": 600}}
 ```
 
-Copilot can review specs and code in its read mode, inside the launch boundary, with the same role shape as below on the `reviewer` role (qualified on Copilot CLI 1.0.102; a planning review in read mode is not implemented). It can judge in its read mode, inside the launch boundary: `{"client": "copilot", "model": "claude-sonnet-5", "timeout": 600, "mode": "read", "boundary": "bwrap"}`. It gets only `view`, `grep` and `glob`, reads the question, the mandate and the decisions in full, and answers in its final message.
+Copilot can review specs and code in its read mode, inside the launch boundary, with the same role shape as below on the `reviewer` role (spec and code reviews qualified on Copilot CLI 1.0.102; the planning review awaits its qualification). It can judge in its read mode, inside the launch boundary: `{"client": "copilot", "model": "claude-sonnet-5", "timeout": 600, "mode": "read", "boundary": "bwrap"}`. It gets only `view`, `grep` and `glob`, reads the question, the mandate and the decisions in full, and answers in its final message.
 
 ## Your own repository
 

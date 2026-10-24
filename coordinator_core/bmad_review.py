@@ -395,6 +395,20 @@ def read_inputs(worktree: Path, sealed: list[dict], extras: list[dict]) -> list[
             for index, item in enumerate(entries)]
 
 
+REVIEW_SKILL = "bmad-review"
+
+
+def planning_read_extras(worktree: Path, report, client_root: str) -> list[dict]:
+    """Copilot reviewer design V2, the planning review: the review skill's own contract files (its `SKILL.md`,
+    `customize.toml`, references and scripts), its override files and the BMAD config layers, each from the
+    fingerprinted contract (the digest the binding seals), read as needed. The reviewer resolves no customization:
+    it reads these copies."""
+    prefixes = (f"{client_root}/{REVIEW_SKILL}/", f"_bmad/custom/{REVIEW_SKILL}", "_bmad/config", "_bmad/custom/config")
+    return [{"kind": "contract", "path": item["path"], "digest": item["digest"], "required": False,
+             "source": {"file": str(worktree / item["path"])}}
+            for item in report.contract_files if item["path"].startswith(prefixes)]
+
+
 def read_section(inputs: list[dict]) -> str:
     lines = ["", "## Read-mode inputs (your only files)",
              "Each line is a staged file under your cwd, then the path it stands for: read the staged file, cite the "
@@ -434,13 +448,16 @@ def _provenance(store, snapshot, contributors) -> tuple[set[str], dict[str, list
 
 def _brief(spec: ReviewPrepare, worktree: Path, sealed: list[dict], carried: dict, bundle: dict,
            decisions: list[dict], own: set[str], inherited: dict[str, list[str]]) -> str:
-    root, claude = spec.client_root, spec.client == clients.CLAUDE.name
+    root, claude, read = spec.client_root, spec.client == clients.CLAUDE.name, spec.mode == "read"
     items = carried["assumptions"] + carried["critical_flags"]
+    lenses = ", ".join(f"`{lens}`" for lens in spec.lenses)
     lines = ["# BMAD review of a sealed planning bundle (one attempt)", "",
              "You are a fresh, read-only reviewer. The coordinator holds all state; this brief is everything you have. "
              + client_label(spec.client), "", "## Read first",
-             f"- `{root}/bmad-review/SKILL.md` and the lens files it names; run exactly these lenses: "
-             + ", ".join(f"`{lens}`" for lens in spec.lenses), "",
+             (f"- The staged copies of `{root}/bmad-review/SKILL.md`, its `customize.toml` (and any override under "
+              f"`_bmad/custom/`) and the lens files they name, listed under Read-mode inputs below; resolve no "
+              f"customization yourself, read those copies. Run exactly these lenses: {lenses}") if read else
+             f"- `{root}/bmad-review/SKILL.md` and the lens files it names; run exactly these lenses: {lenses}", "",
              "## Sealed bundle (read only; read this copy, not the live worktree)"]
     lines += [f"- [{item['kind']}] `{item['path']}` at `{item['sealed_path']}`" for item in sealed]
     lines += ["", "## Carried items needing a disposition (each exactly once)"]
@@ -465,8 +482,23 @@ def _brief(spec: ReviewPrepare, worktree: Path, sealed: list[dict], carried: dic
     lines += ["", "## Severity rubric",
               "`critical` = unsafe for downstream use or contradicts the mandate; `high`, `medium`, `low` otherwise by "
               "consequence. BMAD review has no severity; you assign it here. Never lower a severity to make work pass.",
-              *SEVERITY_RULES,
-              "", "## Rules",
+              *SEVERITY_RULES]
+    if read:   # Copilot reviewer design V5, V6: staged inputs, no attestation, the final message as the return
+        lines += ["", "## Rules",
+                  "- You have only the `view`, `grep` and `glob` tools, over the staged files listed under Read-mode "
+                  "inputs below; nothing else exists for you. Do not call any service or follow any handoff.",
+                  "- Do not start extra reviewers; you are the reviewer.",
+                  "- `location` is `path:line`, with the path a Read-mode inputs line names.",
+                  "- Return the required generic fields plus `bundle_id`, `manifest_digest`, `lenses_run`, `findings` "
+                  "and `dispositions`; there is no `bundle_read`, the coordinator observes which files you read:",
+                  *READ_REVIEW_RULES, AFFECTED_IDS_RULE,
+                  "- Use result `blocked` with an explanation if you cannot read the staged files; that is not a review.",
+                  "- Your final message is the return and nothing else: one JSON object, from `{` to `}`. A sentence "
+                  "before or after it voids the review.",
+                  "", "## Profile line", f"- bundle_id: `{bundle['id']}`",
+                  f"- manifest_digest: `{bundle['manifest_digest']}`", f"- lenses: {', '.join(spec.lenses)}", ""]
+        return "\n".join(lines)
+    lines += ["", "## Rules",
               "- Write nothing anywhere; " + ("your tool policy has no write tools and denies write-capable shell "
                                               "commands; every shell command is recorded and audited. It is a "
                                               "recorded policy, not OS confinement." if claude else
@@ -547,9 +579,6 @@ def review_prepare(repo, store, owner, spec: ReviewPrepare) -> dict:
         raise _invalid("A code review takes no compatibility decision")
     if not code and not spec.compat_decision_id:
         raise _invalid("A planning review needs a compatibility decision")
-    if spec.mode == "read" and not code:   # Copilot reviewer design V2: the planning profile is not staged yet
-        raise DomainError("UNSUPPORTED_STEP", "The read mode for a planning review is not implemented yet; give the "
-                          "reviewer role to claude-code or codex-cli")
     report = None
     if not code:
         report = contract.discover(worktree, spec.client_root)
@@ -574,13 +603,14 @@ def review_prepare(repo, store, owner, spec: ReviewPrepare) -> dict:
     sealed = _sealed_files(bundle, manifest)
     inputs, read_profile = [], None
     if spec.mode == "read":   # Copilot reviewer design V2, V8: the staged input set, and every refusal before a key
-        read_profile = "spec-review" if spec_bundle else "code-review"
+        read_profile = "spec-review" if spec_bundle else "code-review" if code else "planning-review"
         chosen = clients.get(spec.client)
         clients.read_ready(chosen, clients.preflight(chosen)[1], read_profile)
         clients.boundary_ready(spec.boundary, chosen, repo)
         from . import bmad_implementation, bmad_spec_author
         extras = (bmad_spec_author.read_extras(repo, store, feature, manifest) if spec_bundle else
-                  bmad_implementation.read_extras(store, feature, manifest))
+                  bmad_implementation.read_extras(store, feature, manifest) if code else
+                  planning_read_extras(worktree, report, spec.client_root))
         inputs = read_inputs(worktree, sealed, extras)
     shown = [{**item, "sealed_path": entry["alias"]} for item, entry in zip(sealed, inputs)] if inputs else sealed
     if code:
@@ -600,7 +630,7 @@ def review_prepare(repo, store, owner, spec: ReviewPrepare) -> dict:
         text = implementation.review_brief(spec, worktree, shown, bundle, feature, manifest, decisions, carried, store,
                                            repo, snapshot)
     else:
-        text = _brief(spec, worktree, sealed, carried, bundle, decisions, own, inherited)
+        text = _brief(spec, worktree, shown, carried, bundle, decisions, own, inherited)
     if inputs:
         text += read_section(inputs)
     brief = _write_brief(worktree, brief_ref, text)
