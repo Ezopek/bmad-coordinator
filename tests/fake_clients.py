@@ -238,6 +238,11 @@ def copilot_launch(launcher):
 
 
 def copilot_emit(emit, session, mode, payload, cwd, home, target, launcher):
+    if mode == 'auth-fail':   # 1.0.102's log of a refused credential, before any session or stream (issue #3)
+        (home.parent / 'copilot-logs' / 'process.log').write_text(
+            '2026-10-25T18:31:32.329Z [ERROR] [rust:copilot_runtime::auth::manager_orchestration] Failed to fetch '
+            'PAT user login (401): GitHub returned: Bad credentials for gho_fakeleak123\n')
+        return
     state = home / 'session-state'
     (state / session).mkdir(parents=True)
     copilot_locks(state, session)
@@ -333,12 +338,16 @@ if os.environ.get('FAKE_ENVELOPE_OUT'):
     pathlib.Path(os.environ['FAKE_ENVELOPE_OUT']).write_text(hashlib.sha256(raw).hexdigest())
 def listing(path):
     return {'entries': sorted(os.listdir(path)), 'mode': stat.S_IMODE(os.stat(path).st_mode)}
+if os.environ.get('CODEX_SQLITE_HOME'):   # Codex 0.164 opens its SQLite state there at every start (issue #5)
+    for name in ('memories_1.sqlite', 'memories_1.sqlite-wal', 'memories_1.sqlite-shm', 'state_5.sqlite'):
+        (pathlib.Path(os.environ['CODEX_SQLITE_HOME']) / name).write_bytes(b'fake sqlite\n')
 if os.environ.get('FAKE_ENV_OUT'):
     info = {'env': {key: os.environ.get(key) for key in ('BMAD_TEST', 'ALT_HOME', 'ALT_ALLOW_ALL', 'ALT_STRICT',
                                                          'PYTHONDONTWRITEBYTECODE', 'DISABLE_AUTOUPDATER',
                                                          'CLAUDE_CODE_DISABLE_BACKGROUND_TASKS',
                                                          'CLAUDE_CODE_DISABLE_AUTO_MEMORY', 'COPILOT_HOME',
-                                                         'COPILOT_AUTO_UPDATE', 'COPILOT_ALLOW_ALL')},
+                                                         'COPILOT_AUTO_UPDATE', 'COPILOT_ALLOW_ALL',
+                                                         'CODEX_SQLITE_HOME')},
             'names': sorted(os.environ)}  # names only, never values
     if os.environ.get('ALT_HOME'):
         info['alt_home'] = listing(os.environ['ALT_HOME'])

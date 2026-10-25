@@ -635,15 +635,15 @@ def _check_boundary(launch: dict, binding) -> None:
         raise DomainError("UNKNOWN_EVIDENCE", problems[0])
 
 
-def _integrity(repo, directory, baseline, group, git_before=None, state_before=None) -> bool:
+def _integrity(repo, directory, baseline, group, git_before=None, state_before=None) -> dict | None:
     """D16: always written after the group drain and before any terminal classification; F24 adds the Git
-    metadata comparison, before the coordinator's first Git call after the run."""
+    metadata comparison, before the coordinator's first Git call after the run. None when it cannot be written."""
     record = clients.integrity_record(repo, baseline, group, git_before, state_before)
     try:
         private_file(directory / "integrity.json", canonical(record))
     except OSError:
-        return False
-    return clients.integrity_clean(record)
+        return None
+    return record
 
 
 def run_assignment(repo: RepoIdentity, store: Store, owner: OwnerRef, assignment_id: str,
@@ -901,17 +901,15 @@ def run_assignment(repo: RepoIdentity, store: Store, owner: OwnerRef, assignment
                 if isinstance(exc, (OSError, DomainError, subprocess.SubprocessError)):
                     return _report(assignment_id, "unknown", directory, ["launch or process evidence interrupted"])
                 raise
-        clean = _integrity(repo, directory, baseline, group, git_before, state_before)
+        record = _integrity(repo, directory, baseline, group, git_before, state_before)
+        clean = clients.integrity_clean(record)
         failure = None   # design D29: a story attempt the coordinator saw end without a return
         if timed_out:
             if not (_story(profile.name) and not read and clean and group.get("group_terminated")):
                 return _report(assignment_id, "unknown", directory, ["timeout; descendants and hooks may remain"])
             failure = _failure_stop("timeout", process, signals, timeout_seconds)
-        if not clean:
-            return _report(assignment_id, "unknown", directory,
-                           ["sealed evidence or the worktree's Git metadata (config, hooks, attributes, exclude, the "
-                            "worktree pointer) changed during the run, or the process group survived termination; "
-                            "the coordinator ran no Git command after it"])
+        if not clean:   # issue #5: the cause the record names, not every possible one
+            return _report(assignment_id, "unknown", directory, [clients.integrity_cause(record)])
         try:
             after = inventory(repo.worktree)
             if read and delta(cwd_before, inventory(read_cwd)):   # V5: nothing was written

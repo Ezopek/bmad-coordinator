@@ -2,6 +2,11 @@
 
 Dates, with one tag: `v0.1.0` marks the first public release (2026-10-20, the entry below, published as the single-root history of this repository); the installed package carries a `package_revision` digest, not a version. Each entry names the design document (under `docs/`) whose decisions it implements; the document's status line records the evidence.
 
+## 2026-10-25
+
+- Issue #5, Codex's SQLite state ([launch boundary design](docs/launch-boundary-design.md) L3): every Codex launch sets `CODEX_SQLITE_HOME` to the run's own `codex-sqlite/`, so Codex's databases (its cross-session memories among them) and their `-wal`/`-shm` sidecars are the run's, created empty and discarded with it, instead of being opened in the shared `CODEX_HOME`, where a sidecar beside the read-only memories store ended a finished review `unknown`. The guard on persistent entries is unchanged. An unclean integrity record's evidence need now names what it shows (the client-state entries by name) instead of listing every possible cause.
+- Issue #3, the Copilot token's kind ([launch boundary design](docs/launch-boundary-design.md) L3): a classic personal access token (`ghp_`), which the Copilot CLI does not support, is refused before any reservation, whether it is in the documented variable Copilot uses first or is the `gh auth token` a sandboxed launch takes; `doctor --client copilot` reports it as not ready. Receipts record the token's kind (`oauth`, `fine-grained-pat`, `app-user`, `unknown`) beside its source, never the value. A Copilot run that exits non-zero names the authentication error it logged with the cause.
+
 ## 2026-10-24
 
 - D30: `max_judgments` bounds the judgment launches of one step (a story's spec step and implement step each, and each author step of a planning pipeline) instead of the whole drive. The budget's shape and digest are unchanged.

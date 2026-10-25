@@ -52,6 +52,9 @@ if mode == 'sleep':
     sys.exit(0)
 if mode == 'exit-1':   # design D29: a client that fails before any return
     sys.exit(1)
+if os.environ.get('CODEX_SQLITE_HOME'):   # Codex 0.164 opens its SQLite state there at every start (issue #5)
+    for name in ('memories_1.sqlite', 'memories_1.sqlite-wal', 'memories_1.sqlite-shm', 'state_5.sqlite'):
+        (pathlib.Path(os.environ['CODEX_SQLITE_HOME']) / name).write_bytes(b'fake sqlite\n')
 if os.environ.get('FAKE_ENV_OUT'):
     pathlib.Path(os.environ['FAKE_ENV_OUT']).write_text(os.environ.get('BMAD_TEST', 'absent'))
 claimed = []
@@ -358,7 +361,7 @@ class SeamTests(CoreBase):
         terminal = json.loads((directory / "return.json").read_text())
         self.assertEqual({"kind", "assignment_id", "request_fingerprint", "worktree", "common_dir", "source_id",
                           "pid", "argv", "pgid", "requested_sandbox", "model", "cli_version", "envelope_sha256",
-                          "observed_at", "client", "binary"}, set(launch))
+                          "observed_at", "client", "binary", "env_names", "env_unset"}, set(launch))   # issue #5
         self.assertEqual({"kind", "assignment_id", "request_fingerprint", "worktree", "common_dir", "source_id",
                           "client", "result", "changed_paths", "launch_sha256", "checks", "descendants",
                           "unresolved_question", "options", "affected_ids", "thread_id", "exit_code", "before",

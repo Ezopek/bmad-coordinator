@@ -166,6 +166,7 @@ def _codex_argv(spec: LaunchSpec) -> list[str]:
 
 
 CLAUDE_NAME, CODEX_NAME = "claude-code", "codex-cli"   # the registry names, known before the entries exist
+CODEX_SQLITE = "codex-sqlite"   # issue #5: the run's own CODEX_SQLITE_HOME
 
 
 # Launch-boundary design L3: what each client needs inside the sandbox, its runtime and its own state, mounted at
@@ -299,8 +300,12 @@ CODEX = Client(
     boundary_state=_codex_state,
     name="codex-cli", executable="codex", confinement="os-sandbox-requested", presets_session=False,
     return_source="client-file", envelope_via="stdin", max_envelope_bytes=None, write_free_readonly=True,
-    max_turns_default=None, env={}, env_unset=frozenset(), run_subdirs=(), private_subdirs=(),
-    observation_name=None, internal_tools=frozenset(), run_env=lambda spec: {}, allowed_tools=None,
+    max_turns_default=None, env={}, env_unset=frozenset(), run_subdirs=(CODEX_SQLITE,), private_subdirs=(CODEX_SQLITE,),
+    observation_name=None, internal_tools=frozenset(), allowed_tools=None,
+    # issue #5: Codex opens its SQLite state (memories_1.sqlite among them) at every start, whatever its features
+    # say; the run's own, empty home keeps the operator's cross-session state out of the run and the run's
+    # databases and their -wal/-shm sidecars out of the shared CODEX_HOME (CODEX_SQLITE_HOME, 0.164)
+    run_env=lambda spec: {"CODEX_SQLITE_HOME": str(spec.run_dir / CODEX_SQLITE)},
     argv=_codex_argv, observe=None, terminal=_codex_terminal,
     launch_facts=lambda spec: {"web": True} if spec.web and not spec.isolated and spec.mode != "read-only" else {},
     session_scrub=PARENT_MARKERS)  # Codex auth (OPENAI_*, CODEX_*) is outside these patterns and passes
@@ -700,6 +705,13 @@ COPILOT_ISOLATION = ["--no-ask-user", "--no-auto-update", "--no-custom-instructi
 COPILOT_DENIED = [f"write({path})" for path in (*PROTECTED, ".github/**")]
 COPILOT_TOKENS = ("COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN")  # documented headless precedence (docs)
 COPILOT_INHERITED = ("COPILOT", "GH_", "GITHUB")  # inherited variables recorded by name, never by value
+# Issue #3: the token kinds the Copilot CLI docs list by prefix. A classic PAT is documented unsupported; 1.0.102
+# refuses it at start ("Classic PATs are not supported") and, unsandboxed, silently falls back to another credential,
+# so it is refused before any reservation. Any other prefix passes as `unknown`; only the kind is ever recorded.
+COPILOT_TOKEN_KINDS = (("github_pat_", "fine-grained-pat"), ("gho_", "oauth"), ("ghu_", "app-user"),
+                       ("ghp_", "classic-pat"))
+COPILOT_TOKEN_HELP = ("set COPILOT_GITHUB_TOKEN to a fine-grained token with the Copilot Requests permission, or log "
+                      "gh in with OAuth (gh auth login --web)")
 # Tools of the bundle's "edit" category (1.0.91 app.js tool table: edit, create, str_replace_editor, apply_patch);
 # only a tool.execution_start of one of these naming return_path counts as the return write. Bundle-read, not observed.
 COPILOT_WRITE_TOOLS = frozenset({"create", "edit", "str_replace_editor", "apply_patch"})
@@ -998,6 +1010,7 @@ def _copilot_launch_facts(spec: LaunchSpec) -> dict:
              "isolation": {"flags": COPILOT_ISOLATION, "deny_rules": COPILOT_DENIED, "env": dict(COPILOT.env),
                            "inherited_names": inherited, "removed_names": removed, "kept_names": kept_env(COPILOT),
                            "token_names": [name for name in COPILOT_TOKENS if name in present],
+                           "token_kind": (copilot_token(present) or {}).get("token_kind"),   # issue #3
                            "gaps": [f"project-skills:{item}" for item in COPILOT_SKILL_DIRS
                                     if (spec.worktree / item).is_dir()]},
              "session_id": spec.session_id, "return_path": spec.return_path,
@@ -1384,6 +1397,8 @@ def preflight(client: Client) -> tuple[str, str]:
     version = (result.stdout.strip().splitlines() or [""])[0].strip()  # the first line (Copilot adds an update hint)
     if result.returncode != 0 or not version:
         raise DomainError("BLOCKED_EVIDENCE", f"Worker client {client.name} version probe failed")
+    if client.name == COPILOT.name:
+        copilot_token(env)   # issue #3: a classic PAT costs no attempt
     return binary, version
 
 
@@ -1404,12 +1419,32 @@ def _author_extras(env: dict) -> list:
     return mounts
 
 
+def copilot_token_kind(value: str) -> str:
+    return next((kind for prefix, kind in COPILOT_TOKEN_KINDS if value.startswith(prefix)), "unknown")
+
+
+def copilot_token(env: dict) -> dict | None:
+    """Issue #3: the documented variable Copilot uses first, by name and kind (never the value); None when none is
+    set. A classic PAT there is refused, whatever a lower variable or a stored login holds."""
+    name = next((name for name in COPILOT_TOKENS if env.get(name)), None)
+    if name is None:
+        return None
+    kind = copilot_token_kind(env[name])
+    if kind == "classic-pat":
+        raise DomainError("BLOCKED_EVIDENCE", f"Copilot cannot use the token in {name}: a classic personal access "
+                          f"token (ghp_) is not supported by Copilot CLI; {COPILOT_TOKEN_HELP}")
+    return {"token_source": "env", "token_name": name, "token_kind": kind}
+
+
 def boundary_env(client: Client, env: dict) -> tuple[dict, dict]:
     """Launch-boundary L2/L3: the variables a boundary adds to the spawn (names recorded, never values) and the
     receipt's extra facts. A Copilot launch without a documented token variable gets `gh`'s token for github.com
-    in COPILOT_GITHUB_TOKEN; without one the launch is refused."""
+    in COPILOT_GITHUB_TOKEN; without one, or with a classic PAT (issue #3), the launch is refused."""
     added, extra = dict(boundary.ENV), {}
-    if client.name == COPILOT.name and not any(env.get(name) for name in COPILOT_TOKENS):
+    if client.name != COPILOT.name:
+        return added, extra
+    extra = copilot_token(env)
+    if extra is None:
         gh = shutil.which("gh", path=env.get("PATH", os.defpath))
         token = ""
         if gh:
@@ -1421,8 +1456,12 @@ def boundary_env(client: Client, env: dict) -> tuple[dict, dict]:
                 token = ""
         if not token:
             raise boundary.unusable("no Copilot token: set COPILOT_GITHUB_TOKEN, or log in with gh")
+        kind = copilot_token_kind(token)
+        if kind == "classic-pat":
+            raise boundary.unusable("gh's token for github.com is a classic personal access token (ghp_), which "
+                                    f"Copilot CLI does not support; {COPILOT_TOKEN_HELP}")
         added["COPILOT_GITHUB_TOKEN"] = token
-        extra = {"token_source": "gh", "token_host": "github.com"}
+        extra = {"token_source": "gh", "token_host": "github.com", "token_kind": kind}
     return added, extra
 
 
@@ -1551,15 +1590,49 @@ def tool_check(client: Client, mode: str, facts: dict, web: bool = False) -> str
 STOPPED = "the client stopped at its turn limit without a return"   # design D25: an isolated run's stop
 
 
+# Issue #3: an authentication error in Copilot's --log-dir (1.0.102: "Classic PATs are not supported. ...",
+# "Failed to fetch PAT user login (401): GitHub returned: Bad credentials"), before any model call. Only a fixed
+# phrase is reported, never the log's text, which could echo a credential of an unrecognized shape.
+COPILOT_AUTH_LOG = re.compile(r"\[ERROR\] \[rust:copilot_runtime::auth::[\w:]+\] ([^\n]{1,300})")
+COPILOT_AUTH_CAUSES = (("Classic PATs are not supported", "a classic personal access token was refused"),
+                       ("(401)", "GitHub refused the token (401)"))
+
+
+def copilot_auth_failure(run_dir: Path) -> str | None:
+    """The first authentication error Copilot logged in the run, as a fixed phrase: a diagnostic for the evidence
+    needs, never evidence (the client writes the log)."""
+    logs = run_dir / "copilot-logs"
+    try:
+        names = sorted(os.listdir(logs))
+    except OSError:
+        return None
+    for name in names:
+        try:
+            with os.fdopen(os.open(logs / name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as stream:
+                if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                    continue
+                found = COPILOT_AUTH_LOG.search(stream.read(1 << 20).decode("utf-8", "replace"))
+        except OSError:
+            continue
+        if found:
+            return next((cause for marker, cause in COPILOT_AUTH_CAUSES if marker in found.group(1)),
+                        "an authentication error (see its copilot-logs/)")
+    return None
+
+
 def exited_terminal(client: Client, run_dir: Path, launch: dict) -> Terminal:
     """Design D25: the terminal of a run that exited non-zero. Only a client stop outlives the exit code; any other
-    stream (none, malformed or a return) leaves the exit code the cause, as before the stream was read first."""
+    stream (none, malformed or a return) leaves the exit code the cause, as before the stream was read first. A
+    Copilot authentication error it logged is named with the cause (issue #3)."""
+    auth = copilot_auth_failure(run_dir) if client.name == COPILOT.name else None
+    cause = "Worker process exited unsuccessfully" + (f"; Copilot logged an authentication failure: {auth}"
+                                                      if auth else "")
     try:
         terminal = client.terminal(run_dir, launch)
     except (OSError, ValueError, DomainError) as exc:
-        raise _unknown("Worker process exited unsuccessfully") from exc
+        raise _unknown(cause) from exc
     if terminal.stop is None:
-        raise _unknown("Worker process exited unsuccessfully")
+        raise _unknown(cause)
     return terminal
 
 
@@ -1962,6 +2035,25 @@ def integrity_record(repo: RepoIdentity, baseline: dict[str, str], group: dict,
     return record
 
 
+def integrity_cause(record: object) -> str:
+    """Issue #5: the evidence need of an unclean record, naming what changed (the record has the details)."""
+    if not isinstance(record, dict):
+        return "the sealed-evidence integrity record could not be written"
+    causes = []
+    if record.get("modified") or record.get("deleted"):
+        causes.append("sealed evidence changed")
+    if record.get("git_metadata_changed"):
+        causes.append("the worktree's Git metadata (config, hooks, attributes, exclude, the worktree pointer) changed")
+    if record.get("client_state_changed"):
+        names = ", ".join(sorted({Path(item).name for item in record["client_state_changed"]}))
+        moved = "; the entries it created were moved to quarantine" if record.get("client_state_quarantined") else ""
+        causes.append(f"a persistent entry of the client's state changed or was created ({names}){moved}")
+    if record.get("group_terminated") is not True:
+        causes.append("the process group survived termination")
+    return "; ".join(causes or ["the integrity record is not clean"]) + \
+        " during the run (integrity.json); the coordinator ran no Git command after it"
+
+
 def integrity_clean(record: object) -> bool:
     return isinstance(record, dict) and record.get("modified") == [] and record.get("deleted") == [] and \
         record.get("group_terminated") is True and record.get("git_metadata_changed", []) == [] and \
@@ -2149,10 +2241,12 @@ def run_isolated(client: str, target: RepoIdentity, root: Path, cwd: Path, recei
         return unknown("timeout; the process group was signalled")
     if not group["group_terminated"]:
         return unknown("process group survived termination")
-    if state_before is not None and persistent_changes(chosen.name, static_env(chosen), state_before,
-                                                       receipt_dir.parent / f"{receipt_dir.name}.quarantine")[0]:
-        return unknown("the run changed or created a persistent entry of the client's state; a created one was "
-                       "moved to quarantine (launch-boundary L3)")
+    changed = [] if state_before is None else persistent_changes(
+        chosen.name, static_env(chosen), state_before, receipt_dir.parent / f"{receipt_dir.name}.quarantine")[0]
+    if changed:   # issue #5: the entries are named
+        return unknown("the run changed or created a persistent entry of the client's state "
+                       f"({', '.join(sorted({Path(item).name for item in changed}))}); a created one was moved to "
+                       "quarantine (launch-boundary L3)")
     try:
         if process.returncode != 0:   # design D25: the stream is read first, so a stop is named by its cause
             exited_terminal(chosen, receipt_dir, launch)

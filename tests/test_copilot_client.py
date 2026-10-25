@@ -488,9 +488,9 @@ class CopilotClientTests(Harness):
                 launch = self.receipt(report, "launch.json")
                 if client == COPILOT:
                     self.assertLessEqual(removed, set(launch["isolation"]["removed_names"]))
-                else:  # a Codex launch.json keeps exactly the golden keys plus client and binary
+                else:  # a Codex launch.json keeps exactly the golden keys plus client, binary and (issue #5) env
                     keys = json.loads((GOLDEN / "generic" / "launch-keys.json").read_text())
-                    self.assertEqual(set(keys) | {"client", "binary"}, set(launch))
+                    self.assertEqual(set(keys) | {"client", "binary", "env_names", "env_unset"}, set(launch))
         self.assertEqual((frozenset(), clients.PARENT_MARKERS), (clients.CODEX.env_unset, clients.CODEX.session_scrub))
         self.assertEqual(frozenset(), clients.CLAUDE.session_scrub)  # Claude keeps its own scrub and ANTHROPIC*
 
@@ -1045,6 +1045,72 @@ class CopilotClientTests(Harness):
         self.assertEqual((None, False), (missing["client"]["binary"], missing["ready"]))
         self.assertEqual(4, self.version_count())
         self.assertFalse(self.count.exists())  # a preflight is never a model call or a spawn
+        classic = doctor(GH_TOKEN="ghp_classic-secret-value")   # issue #3: not ready, the value never printed
+        self.assertEqual((False, False), (classic["client"]["ready"], classic["ready"]))
+        self.assertIn("token in GH_TOKEN: a classic personal access token", classic["client"]["reasons"][0])
+
+    # -- issue #3: the token's kind ------------------------------------------------------------------------------------
+
+    def test_a_classic_pat_in_the_variable_copilot_uses_is_refused_before_any_reservation(self):
+        classic = "ghp_" + "c" * 36
+        for name in TOKENS:
+            with self.subTest(name=name):
+                assignment = self.assign(idempotency_key=name)
+                before = self.state(assignment)
+                refused = self.code("BLOCKED_EVIDENCE", self.go, assignment, **{name: classic})
+                self.assertIn(f"token in {name}: a classic personal access token", refused.message)
+                self.assertIn("COPILOT_GITHUB_TOKEN", refused.message)
+                self.assertNotIn(classic, refused.message)
+                self.assertEqual((before, []), (self.state(assignment), self.reserved(assignment)))
+                self.assertFalse(os.path.lexists(self.run_dir(assignment)))
+        self.assertFalse(self.count.exists())   # no spawn
+        # Copilot's precedence: a supported COPILOT_GITHUB_TOKEN wins over a classic GH_TOKEN; only the kind is kept
+        _, report = self.author(key="ok", COPILOT_GITHUB_TOKEN="github_pat_" + "f" * 40, GH_TOKEN=classic)
+        self.assertEqual("completed-claim", report.state, report.evidence_needs)
+        self.assertEqual("fine-grained-pat", self.receipt(report, "launch.json")["isolation"]["token_kind"])
+        refused = self.code("BLOCKED_EVIDENCE", clients.copilot_token, {"COPILOT_GITHUB_TOKEN": classic,
+                                                                        "GH_TOKEN": "gho_x", "GITHUB_TOKEN": "gho_y"})
+        self.assertIn("COPILOT_GITHUB_TOKEN", refused.message)   # the highest variable decides, even when classic
+        self.assertEqual({"token_source": "env", "token_name": "GH_TOKEN", "token_kind": "oauth"},
+                         clients.copilot_token({"GH_TOKEN": "gho_x", "GITHUB_TOKEN": classic}))
+        for value, kind in (("gho_a", "oauth"), ("ghu_a", "app-user"), ("github_pat_a", "fine-grained-pat"),
+                            ("ghp_a", "classic-pat"), ("ghs_a", "unknown"), ("fake-token", "unknown")):
+            self.assertEqual(kind, clients.copilot_token_kind(value), value)
+        self.assertIsNone(clients.copilot_token({"COPILOT_GITHUB_TOKEN": "", "PATH": "/bin"}))
+
+    def test_the_boundary_refuses_a_classic_pat_from_gh_and_records_only_the_kind(self):
+        bin_dir = self.root / "gh-bin"
+        bin_dir.mkdir()
+        gh, path = bin_dir / "gh", f"{bin_dir}:/usr/bin:/bin"
+        classic, oauth = "ghp_" + "g" * 36, "gho_" + "g" * 36
+        gh.write_text(f"#!/bin/sh\necho {classic}\n")
+        gh.chmod(0o755)
+        refused = self.code("UNSUPPORTED_CLIENT_MODE", clients.boundary_env, clients.COPILOT, {"PATH": path})
+        self.assertIn("gh's token for github.com is a classic personal access token", refused.message)
+        self.assertNotIn(classic, refused.message)
+        gh.write_text(f"#!/bin/sh\necho {oauth}\n")
+        added, extra = clients.boundary_env(clients.COPILOT, {"PATH": path})
+        self.assertEqual(oauth, added["COPILOT_GITHUB_TOKEN"])   # in the spawn env only; the receipt has the kind
+        self.assertEqual({"token_source": "gh", "token_host": "github.com", "token_kind": "oauth"}, extra)
+        added, extra = clients.boundary_env(clients.COPILOT, {"PATH": path, "GH_TOKEN": oauth})
+        self.assertEqual({"token_source": "env", "token_name": "GH_TOKEN", "token_kind": "oauth"}, extra)
+        self.assertNotIn("COPILOT_GITHUB_TOKEN", added)   # Copilot reads GH_TOKEN itself
+        self.code("BLOCKED_EVIDENCE", clients.boundary_env, clients.COPILOT, {"PATH": path, "GITHUB_TOKEN": classic})
+        self.assertEqual((dict(clients.boundary.ENV), {}),   # another client's launch is not Copilot's business
+                         clients.boundary_env(clients.CLAUDE, {"PATH": path, "GH_TOKEN": classic}))
+
+    def test_an_authentication_failure_copilot_logged_is_named_with_the_cause(self):
+        report = self.failing("auth", FAKE_MODE="auth-fail")
+        self.assertEqual(["Worker process exited unsuccessfully; Copilot logged an authentication failure: GitHub "
+                          "refused the token (401)"], report.evidence_needs)
+        self.assertIsNone(clients.copilot_auth_failure(self.root))   # no log directory: no cause
+        logs = self.root / "auth-run" / "copilot-logs"
+        logs.mkdir(parents=True)
+        for line, cause in (("Classic PATs are not supported. Please use ...", "a classic personal access token was "
+                             "refused"), ("token xyz_SECRET123 rejected", "an authentication error (see its "
+                                                                         "copilot-logs/)")):
+            (logs / "process.log").write_text(f"t [ERROR] [rust:copilot_runtime::auth::manager] {line}\n")
+            self.assertEqual(cause, clients.copilot_auth_failure(self.root / "auth-run"))   # never the log's text
 
     # -- live probe 1 fix round (rulings R1-R6) ----------------------------------------------------------------------
 

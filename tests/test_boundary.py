@@ -491,6 +491,30 @@ class LaunchTests(CoreBase):
         self.assertTrue((Path(moved[0]["to"]) / "x.rules").is_file())
         self.assertTrue(Path(moved[0]["to"]).is_relative_to(self.t.repo.common_dir / "coordinator" / "quarantine"))
 
+    def test_codex_sqlite_state_is_the_runs_own_and_the_shared_memories_stay_untouched(self):
+        (self.codex_home / "memories_1.sqlite").write_bytes(b"operator memories\n")   # issue #5
+        report = self.bounded(self.assign(), FAKE_WRITE=writes(("result.md", "r")))
+        self.assertEqual("completed-claim", report.state, report.evidence_needs)
+        own = Path(report.run_dir) / clients.CODEX_SQLITE
+        self.assertEqual(["memories_1.sqlite", "memories_1.sqlite-shm", "memories_1.sqlite-wal", "state_5.sqlite"],
+                         sorted(os.listdir(own)))
+        self.assertEqual(["config.toml", "memories_1.sqlite"], sorted(os.listdir(self.codex_home)))
+        self.assertEqual(b"operator memories\n", (self.codex_home / "memories_1.sqlite").read_bytes())
+        record = json.loads((Path(report.run_dir) / "integrity.json").read_text())
+        self.assertEqual([], record["client_state_changed"])
+        self.assertIn("CODEX_SQLITE_HOME", json.loads((Path(report.run_dir) / "launch.json").read_text())["env_names"])
+
+    def test_sidecars_created_in_the_shared_codex_home_end_unknown_and_the_cause_names_them(self):
+        (self.codex_home / "memories_1.sqlite").write_bytes(b"operator memories\n")
+        wal = self.codex_home / "memories_1.sqlite-wal"   # absent before the run: still fail-closed
+        report = self.bounded(self.assign(), FAKE_WRITE=writes(("result.md", "r"), (str(wal), "a write\n")))
+        self.assertEqual("unknown", report.state)
+        self.assertEqual(["a persistent entry of the client's state changed or was created (memories_1.sqlite-wal); "
+                          "the entries it created were moved to quarantine during the run (integrity.json); the "
+                          "coordinator ran no Git command after it"], report.evidence_needs)
+        self.assertFalse(wal.exists(), "the operator's next session never replays the run's write")
+        self.assertEqual(b"operator memories\n", (self.codex_home / "memories_1.sqlite").read_bytes())
+
     def test_the_quarantine_follows_no_planted_link(self):
         decoy = self.root / "decoy"
         decoy.mkdir()

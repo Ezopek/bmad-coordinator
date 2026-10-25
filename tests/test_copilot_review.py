@@ -14,7 +14,7 @@ from unittest.mock import patch
 from coordinator_core import bmad_implementation as impl
 from coordinator_core import bmad_review, clients, worker
 from coordinator_core.model import DomainError
-from coordinator_core.run_receipt import read_binding
+from coordinator_core.run_receipt import read_binding, run_name, run_root
 from coordinator_core.service import binding_anchor
 from tests.bmad_fixture import write
 from tests.test_bmad_implementation import GREET, PROJECT, SPEC_PATH, SPEC_READY, TEST, StoryCase
@@ -257,6 +257,25 @@ class ReadReviewTests(StoryCase):
         self.assertEqual("unknown", reconciled.state)   # the sealed return has no anchor, so it is never bound
         row = self.coordinator.detail("assignment", prepared["assignment_id"])
         self.assertNotIn(row["state"], worker.RETURNED)
+
+    def test_a_classic_pat_from_gh_refuses_the_prepare_and_the_launch_before_any_reservation(self):
+        bundle = self.code_bundle()   # issue #3: the sandbox has no stored Copilot login, so it takes gh's token
+        prepared = self.prepare(bundle)
+        classic = "ghp_" + "r" * 36
+        (self.fake_dir / "gh").write_text(f"#!/bin/sh\necho {classic}\n")
+        (self.fake_dir / "gh").chmod(0o755)
+        unset = {"COPILOT_GITHUB_TOKEN": "", "GH_TOKEN": "", "GITHUB_TOKEN": ""}
+        for action in (lambda: self.prepare(bundle, key="r2", **unset),
+                       lambda: self.review(prepared["assignment_id"], **unset)):
+            with self.assertRaises(DomainError) as caught:
+                action()
+            self.assertEqual("UNSUPPORTED_CLIENT_MODE", caught.exception.code)
+            self.assertIn("classic personal access token", caught.exception.message)
+            self.assertNotIn(classic, caught.exception.message)
+        self.assertFalse(any(row["idempotency_key"] == "r2" for row in self.store.read_snapshot()["assignments"]))
+        row = self.coordinator.detail("assignment", prepared["assignment_id"])
+        self.assertEqual("prepared", row["state"])
+        self.assertFalse(os.path.lexists(run_root(self.story_repo) / run_name(row["id"], row["request_fingerprint"])))
 
     def test_a_planning_review_and_a_client_without_a_read_mode_are_refused(self):
         bundle = self.code_bundle()

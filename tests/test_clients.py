@@ -36,6 +36,7 @@ from tests.test_bmad_core import PLAN, writes
 from tests.test_bmad_planning import PRD, PlanningCase, flow
 
 GOLDEN = Path(__file__).parent / "fixtures" / "codex-322752a"
+CODEX_ENV_KEYS = ("env_names", "env_unset")   # issue #5: CODEX_SQLITE_HOME, after the 322752a golden
 
 
 def sha(data: bytes) -> str:
@@ -110,11 +111,12 @@ class GoldenCodexTests(PlanningCase):
         for item in ("events.jsonl", "last.json", "return.schema.json"):
             self.assertEqual((golden / item).read_bytes(), norm((run_dir / item).read_bytes()), item)
         terminal = json.loads((run_dir / "return.json").read_bytes())
-        self.assertEqual(set(json.loads((golden / "launch-keys.json").read_text())) | {"client", "binary"}, set(launch))
+        keys = set(json.loads((golden / "launch-keys.json").read_text()))
+        self.assertEqual(keys | {"client", "binary", *CODEX_ENV_KEYS}, set(launch))
         self.assertEqual(set(json.loads((golden / "return-keys.json").read_text())) | {"client"}, set(terminal))
         masks = {"launch.json": ("envelope_sha256", "binding_sha256"), "return.json": ("launch_sha256", "last_sha256"),
                  "envelope.json": ("initial_inventory_digest",)}
-        drops = {"launch.json": ("client", "binary"), "return.json": ("client",), "envelope.json": ()}
+        drops = {"launch.json": ("client", "binary", *CODEX_ENV_KEYS), "return.json": ("client",), "envelope.json": ()}
         for item, mask in masks.items():
             self.assertEqual(self.shape((golden / item).read_bytes(), mask=mask),
                              self.shape(norm((run_dir / item).read_bytes()), drops[item], mask), item)
@@ -344,7 +346,8 @@ class ClientTests(Harness):
         self.assertEqual(("unknown", "running"), (report.state, self.state(assignment)))
         directory = Path(report.run_dir)
         launch, terminal = self.receipt(report, "launch.json"), self.receipt(report)
-        legacy_launch = {key: value for key, value in launch.items() if key not in ("client", "binary")}
+        legacy_launch = {key: value for key, value in launch.items()
+                         if key not in ("client", "binary", *CODEX_ENV_KEYS)}
         legacy_launch["argv"] = ["codex", *launch["argv"][1:]]
         legacy_return = {key: value for key, value in terminal.items() if key not in ("client", "client_facts")}
         legacy_return["launch_sha256"] = sha(canonical(legacy_launch))
@@ -613,8 +616,8 @@ class ClientTests(Harness):
             report = self.go(assignment, FAKE_WRITE=writes(("result.md", "r")))
         self.assertEqual("completed-claim", report.state, report.evidence_needs)
         index = next(i for i, item in enumerate(order) if item[0] == "spawn")
-        self.assertEqual(("spawn", True, ["envelope.json", "events.jsonl", "last.json", "return.schema.json",
-                                          "stderr.log"]), order[index])
+        self.assertEqual(("spawn", True, ["codex-sqlite", "envelope.json", "events.jsonl", "last.json",
+                                          "return.schema.json", "stderr.log"]), order[index])
         self.assertEqual(("write", "launch-intent.json"), order[index + 1])
         self.assertEqual(("write", "launch.json"), order[index + 2])
         intent, launch = self.receipt(report, "launch-intent.json"), self.receipt(report, "launch.json")
@@ -831,7 +834,8 @@ class ClientTests(Harness):
         self.assertEqual(["state", "source_id", "final", "receipt_dir", "launch_sha256", "return_sha256", "needs"],
                          [item.name for item in fields(clients.IsolatedRun)])
         codex = clients.CODEX
-        self.assertEqual(("codex-cli", "codex", "client-file", "stdin", None, True, False, None, {}, frozenset(), (), (),
+        self.assertEqual(("codex-cli", "codex", "client-file", "stdin", None, True, False, None, {}, frozenset(),
+                          ("codex-sqlite",), ("codex-sqlite",),
                           None, None, None, frozenset(), "os-sandbox-requested"),
                          (codex.name, codex.executable, codex.return_source, codex.envelope_via,
                           codex.max_envelope_bytes, codex.write_free_readonly, codex.presets_session,
@@ -842,7 +846,10 @@ class ClientTests(Harness):
         self.assertEqual((False, False, True), (codex.script_launcher, clients.CLAUDE.script_launcher,
                                                 clients.COPILOT.script_launcher))  # Copilot live probe 1, ruling R3
         spec = clients.LaunchSpec("/bin/codex", "workspace-write", Path("/w"), Path("/r"), {}, "m", None, None, (), ())
-        self.assertEqual(({}, {}), (codex.run_env(spec), codex.launch_facts(spec)))
+        self.assertEqual(({"CODEX_SQLITE_HOME": "/r/codex-sqlite"}, {}),
+                         (codex.run_env(spec), codex.launch_facts(spec)))
+        self.assertEqual({"env_names": ["CODEX_SQLITE_HOME"], "env_unset": []},   # issue #5: names, recorded
+                         clients.launch_env(codex, codex.run_env(spec)))
         self.assertEqual(["/bin/codex", "exec", "-", "-C", "/w", "--sandbox", "workspace-write", "-c",
                           "approval_policy=never", "--json", "--output-schema", "/r/return.schema.json",
                           "--output-last-message", "/r/last.json", "-m", "m"], codex.argv(spec))
