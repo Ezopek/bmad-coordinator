@@ -294,6 +294,17 @@ class CliTests(SnapshotCase):
         self.assertEqual((first["tree"], False), (again["tree"], again["written"]))
         self.assertEqual(2, len(self.events()))
 
+    def test_materialize_refuses_a_closed_feature(self):
+        from coordinator_core.model import DecisionInput, OwnerRef
+        from coordinator_core.service import Coordinator
+        owner = OwnerRef(**json.loads(self.token.read_text()))
+        coordinator = Coordinator(self.store)
+        decision = coordinator.record_decision(owner, DecisionInput(
+            self.t.feature_id, 1, "operator-reported", "chat:drop", "dropped", {}))
+        coordinator.close_feature(owner, self.t.feature_id, 1, decision, "abandoned")
+        self.assertEqual("FEATURE_CLOSED", self.materialize(ok=False)["error"])
+        self.assertFalse((self.t.path / "_bmad").exists())
+
     def test_materialize_refuses_a_committed_install(self):
         snapshot.materialize(self.t.repo, self.root_, snapshot.take_snapshot(self.t.repo, self.root_))
         git(self.t.path, "add", "-f", "_bmad", ".agents/skills")

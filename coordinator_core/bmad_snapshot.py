@@ -351,12 +351,16 @@ def doctor(repo: RepoIdentity, client_root: str) -> dict:
 def materialize_command(repo: RepoIdentity, store, owner, client_root: str, tree: str | None) -> dict:
     """S10: `bmad materialize` in the feature's own worktree, then the event; idempotent."""
     from .repo import resolve_repo
+    from .service import require_open_feature
     check_root(client_root)
     features = store.read_export_snapshot(owner)["features"]   # authenticates the owner first
-    feature = next((row for row in features if row["worktree"] and resolve_repo(Path(row["worktree"])) == repo),
-                   None)
+    matching = [row for row in features if row["worktree"] and resolve_repo(Path(row["worktree"])) == repo]
+    # an open feature first: a worktree may be reused by a new feature after its old one closed
+    feature = next((row for row in matching if row["state"] in ("active", "unresolved")),
+                   matching[0] if matching else None)
     if feature is None:
         raise DomainError("INVALID_REPOSITORY", "Materialize must run in a feature's recorded worktree")
+    require_open_feature({"features": features}, feature["id"])   # feature lifecycle F5: before anything is written
     tree = tree if tree is not None else take_snapshot(repo, client_root)
     written = materialize(repo, client_root, tree)
     record(repo, store, owner, feature["id"], tree)

@@ -20,7 +20,7 @@ from .backlog_bmad import plan_stories, sprint_entries   # backlog design A2
 from .drive import EPIC_SESSION, EXIT, TOKEN, Outcome, Refusal, RunBounds, _bounds_check, _hook, _now, _seal, _sealed
 from .model import DecisionInput, DomainError, OwnerRef
 from .run_receipt import canonical
-from .service import Coordinator
+from .service import CLOSED_STATES, Coordinator
 from .store import open_store
 
 FORMAT = 1
@@ -1040,6 +1040,18 @@ def start(repo, spec: EpicInput, template, token_path: Path, bounds: RunBounds, 
         os.close(fd)
 
 
+def _current_story_open(snapshot: dict, state: dict, skip: str | None) -> None:
+    """Feature lifecycle F5, under the lock before any write: the current story's feature must be open, unless this
+    resume skips that story (a restart revises the same feature's mandate, so it is refused)."""
+    current = next((item for item in state["stories"] if item["state"] == "current"), None)
+    if current is None or not current.get("feature_id") or current["key"] == skip:
+        return
+    feature = next((row for row in snapshot["features"] if row["id"] == current["feature_id"]), None)
+    if feature is not None and feature["state"] in CLOSED_STATES:
+        raise DomainError("FEATURE_CLOSED", f"Feature is closed ({feature['state']}): the current story "
+                          f"{current['key']} cannot continue; epic resume --skip {current['key']} leaves it")
+
+
 def resume(repo, owner: OwnerRef | None, bounds=None, judgment_root=None, *, skip: str | None = None,
            restart: str | None = None, roles: dict | None = None, budgets: dict | None = None,
            max_cost_usd=None, epic_id: str | None = None, token_path: Path | None = None,
@@ -1064,6 +1076,7 @@ def resume(repo, owner: OwnerRef | None, bounds=None, judgment_root=None, *, ski
             state = newest_state(store, epic_id)
             if state is None:
                 raise Refusal("NOT_FOUND", "No such epic", "run-unbound", "epic status lists the epics")
+            _current_story_open(store.read_snapshot(), state, skip)
             owner = Coordinator(store).claim(EPIC_SESSION + epic_id, token_path)
             state = {**state, "generation": owner.generation, "revision": state["revision"] + 1, "advanced_at": _now()}
             anchor_state(store, owner, state, "epic.advanced", "reclaim")
@@ -1074,8 +1087,9 @@ def resume(repo, owner: OwnerRef | None, bounds=None, judgment_root=None, *, ski
                         row["subject_id"] == current["lease_id"]]
                 drive.reseal_lease(store, owner, _sealed(store.path.parent, rows[-1]), f"lease-g{owner.generation}")
         else:
-            store.read_export_snapshot(owner)   # the fence first: a stale or never-claimed token is OWNERSHIP_CONFLICT
+            snapshot = store.read_export_snapshot(owner)   # the fence first: a stale or unclaimed token is refused
             state = find_epic(store, owner)
+            _current_story_open(snapshot, state, skip)
         template = drive_pipeline.read_sealed_json(store.path.parent, state["template_ref"], state["template_sha256"])
         if not isinstance(bounds, RunBounds):
             bounds = RunBounds(**{**state["bounds"], **(bounds or {})})

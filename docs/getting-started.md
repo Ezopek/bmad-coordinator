@@ -224,7 +224,7 @@ Exit `10` (`continue`) needs only `epic resume`. The full table with every reaso
 
 ### When it is done
 
-`epic-done` releases the coordinator's ownership. Review `coordinator/epic-<N>` (every attempt is a commit, so `git log` tells the whole story), merge it or open the pull request yourself, then remove the worktrees and branches you no longer need (`git worktree remove`, `git branch -D`). The evidence stays under `.git/coordinator/` and `run epic status` keeps answering.
+`epic-done` releases the coordinator's ownership. Review `coordinator/epic-<N>` (every attempt is a commit, so `git log` tells the whole story), merge it or open the pull request yourself, then remove the worktrees and branches you no longer need (`git worktree remove`, `git branch -D`). The evidence stays under `.git/coordinator/` and `run epic status` keeps answering. To take the finished stories off `status`, claim the repository again and close each story's feature after the merge: `run decision add` (the merge, for example) and then `run feature close <feature id>` with `{"expected_revision": <its revision>, "decision_id": <the decision>, "resolution": "completed"}` ([usage](state-core-usage.md)); `run status --all` still lists them.
 
 ### Costs
 

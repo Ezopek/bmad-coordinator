@@ -119,7 +119,7 @@ class ReviewEvidence:
 @dataclass(frozen=True)
 class VerificationReport:
     historical_accepted: bool
-    current: Literal["current", "stale", "unknown"]
+    current: Literal["current", "stale", "unknown", "closed"]
     checked: list[dict[str, Any]] = field(default_factory=list)
 
 

@@ -1676,6 +1676,30 @@ class EpicStopTests(EpicDriveCase):
         self.assertIn("the new function, written again", git(self.main, "show", f"story/1-2-farewell:{SPEC_PATH}"))
 
 
+class FeatureClosedEpicTests(EpicDriveCase):
+    def test_epic_resume_refuses_a_closed_current_story_unless_it_is_skipped(self):
+        self.base = self.commit_files({f"{ARTIFACTS}/sprint-status.yaml":
+                                       sprint_file(**{"1-3-shout": "done", "1-4-whisper": "done"})}, "sprint")
+        self.template_file = self.write_template(spec_auto_accept=False)
+        self.assertEqual("spec-decisions", self.epic_start(code=11)[1]["reason"])
+        feature = next(row for row in self.snapshot()["features"] if row["branch"] == "story/1-2-farewell")
+        owner = self.driver_owner()
+        coordinator = Coordinator(self.store)
+        decision = coordinator.record_decision(owner, DecisionInput(
+            feature["id"], feature["mandate_revision"], "operator-reported", "chat:drop", "dropped", {}))
+        coordinator.close_feature(owner, feature["id"], feature["mandate_revision"], decision, "abandoned")
+        before = self.snapshot()["revision"]
+        err = self.epic_resume(code=4)[2]
+        self.assertEqual("FEATURE_CLOSED", err["error"])
+        self.assertIn("--skip 1-2-farewell", err["message"])
+        self.assertEqual(before, self.snapshot()["revision"])
+        err = self.epic_resume("--restart", "1-2-farewell", code=4)[2]
+        self.assertEqual("FEATURE_CLOSED", err["error"])
+        self.assertEqual(before, self.snapshot()["revision"])
+        code, summary, _ = self.epic_resume("--skip", "1-2-farewell")
+        self.assertIn(("1-2-farewell", "skipped"), self.states(summary))
+
+
 class EpicStatusTests(EpicDriveCase):
     """Task 6: `epic status` and the `integration-current` criterion."""
 

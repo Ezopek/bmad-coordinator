@@ -23,6 +23,8 @@ CONTINUATION_UNSUPPORTED = ("same-process continuation unsupported; resolve the 
                             "then add a fresh assignment with blocking_requests")
 HOLDING_STATES = ("launch-pending", "launch-unknown", "running")
 TERMINAL_STATES = ("completed-claim", "needs-decision", "blocked", "client-stopped")   # design D25: client-stopped
+CLOSED_STATES = ("completed", "abandoned")   # feature lifecycle design F1
+FEATURE_EVENTS = ("pipeline.bound", "bmad.materialized")   # F5: driver events whose subject is a feature
 MANDATE_FIELDS = {"outcome", "exclusions", "constraints", "completion", "authority"}
 JSON_FIELDS = MANDATE_FIELDS - {"outcome"}
 DRIVE_EVENTS = frozenset({"pipeline.bound", "drive.leased", "drive.started", "drive.turn", "drive.stop-acknowledged",
@@ -107,6 +109,27 @@ def _event(conn, kind, subject_id, anchor=None):
         raise DomainError("CORRUPT_STATE", "Transaction already recorded an event")
     conn.execute("INSERT INTO events(id, revision, kind, subject_id, source_id, evidence_ref, payload_digest) "
                  "VALUES (?, ?, ?, ?, ?, ?, ?)", (str(uuid.uuid4()), revision, kind, subject_id, *(anchor or (None,) * 3)))
+
+
+def _open_feature(row) -> None:
+    """F5: a closed feature refuses every write that starts or records work."""
+    if row is not None and row["state"] in CLOSED_STATES:
+        raise DomainError("FEATURE_CLOSED",
+                          f"Feature is closed ({row['state']}): record a new feature for further work")
+
+
+def _feature_of(conn, assignment_id: str) -> None:
+    """F5, inside an assignment mutation's transaction: the assignment's feature must be open."""
+    _open_feature(conn.execute("SELECT f.state FROM assignments a JOIN features f ON f.id=a.feature_id "
+                               "WHERE a.id=?", (assignment_id,)).fetchone())
+
+
+def require_open_feature(snapshot: dict, feature_id: str) -> None:
+    """F5, a driver's or command's check before any work: the feature exists and is open."""
+    feature = next((row for row in snapshot["features"] if row["id"] == feature_id), None)
+    if feature is None:
+        raise DomainError("NOT_FOUND", "Feature does not exist")
+    _open_feature(feature)
 
 
 def _observed(return_json) -> bool:
@@ -384,6 +407,9 @@ class Coordinator:
         base = self.store.path.parent
 
         def change(conn):
+            feature_id = subject_id if kind in FEATURE_EVENTS else source_id if kind == "drive.leased" else None
+            if feature_id is not None:
+                _open_feature(conn.execute("SELECT state FROM features WHERE id=?", (feature_id,)).fetchone())
             _anchored_bytes(base, ref, digest, ANCHOR_TOPS)
             _event(conn, kind, subject_id, (source_id, ref, digest))
         self.store.write(owner, change)
@@ -456,9 +482,10 @@ class Coordinator:
         decision_id = str(uuid.uuid4())
 
         def change(conn):
-            row = conn.execute("SELECT mandate_revision FROM features WHERE id=?", (spec.feature_id,)).fetchone()
+            row = conn.execute("SELECT mandate_revision, state FROM features WHERE id=?", (spec.feature_id,)).fetchone()
             if row is None:
                 raise DomainError("NOT_FOUND", "Feature does not exist")
+            _open_feature(row)
             if row[0] != spec.mandate_revision:
                 raise DomainError("REVISION_CONFLICT", "Decision mandate revision is stale")
             if spec.request_id is not None:
@@ -505,6 +532,7 @@ class Coordinator:
             feature = conn.execute("SELECT * FROM features WHERE id=?", (spec.feature_id,)).fetchone()
             if feature is None:
                 raise DomainError("NOT_FOUND", "Feature does not exist")
+            _open_feature(feature)
             if feature["mandate_revision"] != spec.mandate_revision:
                 raise DomainError("STALE_INPUT", "Mandate revision changed")
             worktree = _resolved_worktree(feature)
@@ -567,6 +595,7 @@ class Coordinator:
                 if (bound["source_id"], bound["evidence_ref"], bound["payload_digest"]) == anchor:
                     raise _NoChange()
                 raise DomainError("BLOCKED_EVIDENCE", "Assignment already has a different binding")
+            _feature_of(conn, assignment_id)
             if row["state"] != "prepared":
                 raise DomainError("BLOCKED_EVIDENCE", "Only prepared assignments can be bound")
             value = read_binding(self.store.path.parent, evidence.ref, digest)
@@ -584,6 +613,7 @@ class Coordinator:
             row = conn.execute("SELECT state FROM assignments WHERE id=?", (assignment_id,)).fetchone()
             if row is None:
                 raise DomainError("NOT_FOUND", "Assignment does not exist")
+            _feature_of(conn, assignment_id)
             if row["state"] != "prepared":
                 raise DomainError("BLOCKED_EVIDENCE", "Only prepared assignments can be cancelled")
             conn.execute("UPDATE assignments SET state='cancelled-before-launch' WHERE id=?", (assignment_id,))
@@ -600,7 +630,7 @@ class Coordinator:
             raise DomainError("BLOCKED_EVIDENCE", "Contributors mix unbound and bound or different profiles")
         if reviewer is not None:
             states.append((reviewer, *binding_anchor(snapshot["events"], reviewer["id"])))
-        worktree = Path(feature["worktree"]) if feature["worktree"] and feature["state"] != "unresolved" else None
+        worktree = Path(feature["worktree"]) if feature["worktree"] and feature["state"] == "active" else None
         reasons = []
         for row, name, bound in states:
             if name is not None:
@@ -615,6 +645,7 @@ class Coordinator:
         current = next((item for item in snapshot["assignments"] if item["id"] == assignment_id), None)
         if current is None:
             raise DomainError("NOT_FOUND", "Assignment does not exist")
+        require_open_feature(snapshot, current["feature_id"])   # F5: before the reserve gate runs any subprocess
         if current["state"] != "prepared":
             raise DomainError("BLOCKED_EVIDENCE", "Assignment is not prepared")
         name, bound = binding_anchor(snapshot["events"], assignment_id)
@@ -648,6 +679,7 @@ class Coordinator:
                                          now_bound["payload_digest"])) != anchor:
                 raise DomainError("BLOCKED_EVIDENCE", "Binding changed during reservation")
             feature = conn.execute("SELECT mandate_revision, worktree, state FROM features WHERE id=?", (row["feature_id"],)).fetchone()
+            _open_feature(feature)
             if feature["mandate_revision"] != row["mandate_revision"]:
                 raise DomainError("STALE_INPUT", "Mandate revision changed")
             worktree = _resolved_worktree(feature)
@@ -694,6 +726,7 @@ class Coordinator:
             row = conn.execute("SELECT state FROM assignments WHERE id=?", (assignment_id,)).fetchone()
             if row is None:
                 raise DomainError("NOT_FOUND", "Assignment does not exist")
+            _feature_of(conn, assignment_id)
             if row["state"] not in ("launch-pending", "launch-unknown"):
                 raise DomainError("BLOCKED_EVIDENCE", "Launch was not reserved")
             state = "running" if classification == "observed" else "launch-unknown"
@@ -722,6 +755,7 @@ class Coordinator:
                    (result.source_id, result.event_ref, result.payload_digest):
                     raise _NoChange()
                 raise DomainError("BLOCKED_EVIDENCE", "Terminal receipt already has a different anchor")
+            _feature_of(conn, assignment_id)
             _event(conn, "assignment.return-sealed", assignment_id)
             conn.execute("UPDATE events SET source_id=?, evidence_ref=?, payload_digest=? "
                          "WHERE revision=(SELECT revision+1 FROM meta)",
@@ -753,6 +787,7 @@ class Coordinator:
                 raise DomainError("BLOCKED_EVIDENCE", "Assignment has no reserved launch")
             feature = conn.execute("SELECT worktree, state, writable_paths_json FROM features WHERE id=?",
                                    (row["feature_id"],)).fetchone()
+            _open_feature(feature)
             if result.changed_paths:
                 _files(_resolved_worktree(feature), result.changed_paths, check_current=False)
                 allowed = [path if path.endswith("/") else _path_identity(_resolved_worktree(feature), path)
@@ -801,6 +836,7 @@ class Coordinator:
             row = conn.execute("SELECT * FROM features WHERE id=?", (feature_id,)).fetchone()
             if row is None:
                 raise DomainError("NOT_FOUND", "Feature does not exist")
+            _open_feature(row)
             if row["mandate_revision"] != expected_revision:
                 raise DomainError("REVISION_CONFLICT", "Mandate revision is stale")
             decision = conn.execute("SELECT feature_id, mandate_revision FROM decisions WHERE id=?", (decision_id,)).fetchone()
@@ -820,6 +856,58 @@ class Coordinator:
         except _NoChange:
             return expected_revision
 
+    def close_feature(self, owner: OwnerRef, feature_id: str, expected_revision: int, decision_id: str,
+                      resolution: str) -> str:
+        """Feature lifecycle design F1 to F6: a terminal state justified by a decision at the current revision, refused
+        while work is in flight; the mandate revision is kept and the dirty paths' digests are stored for export."""
+        from .exporter import file_digests_of
+
+        if type(expected_revision) is not int or not isinstance(decision_id, str) or not decision_id:
+            raise DomainError("INVALID_INPUT", "Close input has the wrong type")
+        if resolution not in CLOSED_STATES:
+            raise DomainError("INVALID_INPUT", "Resolution must be completed or abandoned")
+
+        def change(conn):
+            row = conn.execute("SELECT * FROM features WHERE id=?", (feature_id,)).fetchone()
+            if row is None:
+                raise DomainError("NOT_FOUND", "Feature does not exist")
+            if row["state"] in CLOSED_STATES:
+                closing = conn.execute("SELECT source_id FROM events WHERE kind IN ('feature.completed', "
+                                       "'feature.abandoned') AND subject_id=? ORDER BY revision DESC LIMIT 1",
+                                       (feature_id,)).fetchone()
+                if row["state"] == resolution and closing is not None and closing[0] == decision_id:
+                    raise _NoChange()
+                _open_feature(row)
+            if row["mandate_revision"] != expected_revision:
+                raise DomainError("REVISION_CONFLICT", "Mandate revision is stale")
+            decision = conn.execute("SELECT feature_id, mandate_revision FROM decisions WHERE id=?", (decision_id,)).fetchone()
+            if decision is None or tuple(decision) != (feature_id, expected_revision):
+                raise DomainError("INVALID_INPUT", "Closing a feature requires a matching decision")
+            reasons = []
+            for item in conn.execute("SELECT id, state, return_json FROM assignments WHERE feature_id=?",
+                                     (feature_id,)):
+                if item["state"] == "prepared":
+                    reasons.append(f"assignment {item['id']} is prepared: assignment cancel-prepared {item['id']}")
+                elif holds_fence(item["state"], item["return_json"]):
+                    reasons.append(f"assignment {item['id']} holds the attempt fence ({item['state']}): recover, "
+                                   f"then attempt resolve {item['id']}")
+            for item in conn.execute("SELECT id FROM decision_requests WHERE feature_id=? AND state!='resolved'",
+                                     (feature_id,)):
+                reasons.append(f"decision request {item['id']} is open: decision add with its request_id")
+            if reasons:
+                raise DomainError("BLOCKED_EVIDENCE", "Feature has work in flight; " + "; ".join(reasons))
+            digests = row["portable_file_digests_json"]
+            if row["state"] == "active" and row["worktree"]:
+                digests = _json(file_digests_of(Path(row["worktree"]), json.loads(row["dirty_paths_json"])))
+            conn.execute("UPDATE features SET state=?, portable_file_digests_json=? WHERE id=?",
+                         (resolution, digests, feature_id))
+            _event(conn, "feature." + resolution, feature_id, (decision_id, None, None))
+        try:
+            self.store.write(owner, change)
+        except _NoChange:
+            pass
+        return resolution
+
     def capture_bundle(self, owner: OwnerRef, spec: BundleInput) -> str:
         from . import bundles
 
@@ -835,6 +923,7 @@ class Coordinator:
         feature = next((row for row in snapshot["features"] if row["id"] == spec.feature_id), None)
         if feature is None:
             raise DomainError("NOT_FOUND", "Feature does not exist")
+        _open_feature(feature)   # F5, before the bundle store is written (a capture's replay is known only after it)
         worktree = _resolved_worktree(feature)
         _safe_feature_paths(worktree, spec.artifact_paths)
         if len({_path_identity(worktree, path) for path in spec.artifact_paths}) != len(spec.artifact_paths):
@@ -875,7 +964,8 @@ class Coordinator:
                 if existing["path"] != str(path) or existing["manifest_digest"] != bundle_id:
                     raise DomainError("CORRUPT_STATE", "Bundle ID collides with a different record")
                 raise _NoChange()
-            current = conn.execute("SELECT mandate_revision FROM features WHERE id=?", (spec.feature_id,)).fetchone()
+            current = conn.execute("SELECT mandate_revision, state FROM features WHERE id=?", (spec.feature_id,)).fetchone()
+            _open_feature(current)
             if current is None or current[0] != feature["mandate_revision"]:
                 raise DomainError("STALE_INPUT", "Mandate changed during capture")
             current_contributors = _artifact_contributors(
@@ -935,6 +1025,8 @@ class Coordinator:
                         raise DomainError("BLOCKED_EVIDENCE", "Anchored review receipt already recorded differently")
                     existing_review[0] = prior["id"]
                     raise _NoChange()
+            _open_feature(conn.execute("SELECT f.state FROM bundles b JOIN features f ON f.id=b.feature_id "
+                                       "WHERE b.id=?", (spec.bundle_id,)).fetchone())
             conn.execute("INSERT INTO reviews(id, bundle_id, reviewer_id, provenance_ref, provenance_class, "
                          "finding_json, critical_open) VALUES (?,?,?,?,?,?,?)",
                          (review_id, spec.bundle_id, spec.reviewer_id, spec.source_ref, classification,
@@ -949,7 +1041,8 @@ class Coordinator:
     def _bundle_currentness(self, bundle: dict, feature: dict, decisions: list[dict]) -> tuple[str, dict]:
         from . import bundles
 
-        if not bundle["path"] or not feature["worktree"] or feature["state"] == "unresolved":
+        closed = feature["state"] in CLOSED_STATES   # F9: every check but the file comparison
+        if not bundle["path"] or not closed and (not feature["worktree"] or feature["state"] == "unresolved"):
             return "unknown", {"bundle_id": bundle["id"], "reason": "imported-evidence"}
         try:
             manifest = bundles.read_manifest(Path(bundle["path"]), bundle["manifest_digest"])
@@ -971,6 +1064,8 @@ class Coordinator:
             decided = sealed_decisions_state(manifest, decisions)
             if decided != "current":
                 return decided, {**references, "reason": "decision-record"}
+            if closed:
+                return "closed", {**references, "files_compared": False}
             source_state = bundles.source_state(Path(feature["worktree"]), manifest)
             if source_state != "current":
                 return source_state, {**references, "reason": "file-digest"}
@@ -996,6 +1091,7 @@ class Coordinator:
         if any(row["critical_open"] for row in snapshot["reviews"] if row["bundle_id"] == bundle_id):
             raise DomainError("BLOCKED_EVIDENCE", "Bundle has an open critical finding")
         feature = next(row for row in snapshot["features"] if row["id"] == bundle["feature_id"])
+        _open_feature(feature)
         reasons = self._acceptance_gates(snapshot, "accept", bundle, review, feature)
         if reasons:
             raise DomainError("BLOCKED_EVIDENCE", "; ".join(reasons))
@@ -1006,7 +1102,8 @@ class Coordinator:
         dependencies = [entry for entry in checked["files"] if entry["kind"] == "dependency"]
 
         def change(conn):
-            current = conn.execute("SELECT mandate_revision FROM features WHERE id=?", (bundle["feature_id"],)).fetchone()
+            current = conn.execute("SELECT mandate_revision, state FROM features WHERE id=?", (bundle["feature_id"],)).fetchone()
+            _open_feature(current)
             if current is None or current[0] != bundle["mandate_revision"]:
                 raise DomainError("STALE_INPUT", "Mandate changed before acceptance")
             if conn.execute("SELECT 1 FROM reviews WHERE bundle_id=? AND critical_open=1", (bundle_id,)).fetchone():
@@ -1032,7 +1129,7 @@ class Coordinator:
             state, details = self._bundle_currentness(bundle, features[bundle["feature_id"]], snapshot["decisions"])
             if bundle["id"] in blocked_bundles:
                 state, details = "unknown", {**details, "reason": "open-critical-finding"}
-            elif state == "current":
+            elif state in ("current", "closed"):
                 review = next(row for row in snapshot["reviews"] if row["id"] == acceptance["review_id"])
                 try:
                     reasons = self._acceptance_gates(snapshot, "verify", bundle, review, features[bundle["feature_id"]])
@@ -1044,12 +1141,14 @@ class Coordinator:
                         state, details = "unknown", {**details, "reason": "profile-gate", "gate": reasons}
             checked.append({"acceptance_id": acceptance["id"], "current": state, **details})
         current = "current" if any(item["current"] == "current" for item in checked) else \
-                  "unknown" if any(item["current"] == "unknown" for item in checked) else "stale"
+                  "unknown" if any(item["current"] == "unknown" for item in checked) else \
+                  "stale" if any(item["current"] == "stale" for item in checked) else "closed"
         return VerificationReport(True, current, checked)
 
-    def status(self) -> dict:
+    def status(self, include_closed: bool = False) -> dict:
         snapshot = self.store.read_snapshot()
-        features = snapshot["features"]
+        closed = [row["id"] for row in snapshot["features"] if row["state"] in CLOSED_STATES]
+        features = [row for row in snapshot["features"] if include_closed or row["state"] not in CLOSED_STATES]
         questions = [item["id"] for item in snapshot["decision_requests"] if item["state"] != "resolved"]
         owner = dict(snapshot["owner"])
         if owner["session_id"] is not None:
@@ -1063,6 +1162,7 @@ class Coordinator:
                                               "exclusions": row["exclusions_json"][:160],
                                               "authority": row["authority_json"][:160]},
                           "detail": {"kind": "feature", "id": row["id"]}} for row in features[:100]],
+            "closed_feature_ids": closed[-100:],   # F8: the newest closed features, hidden from the list above
             "open_question_ids": questions[:100],
             "tasks": [{"id": row["id"], "feature_id": row["feature_id"], "state": row["state"],
                        "detail": {"kind": "assignment", "id": row["id"]}}

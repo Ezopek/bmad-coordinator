@@ -320,6 +320,34 @@ class ReleaseLockHandoffTests(Base):
         self.assertEqual([], self.launch_log())
 
 
+class FeatureClosedDriveTests(Base):
+    """Feature lifecycle design F5: a driver checks its feature's state under the lock before any write."""
+
+    def close(self, owner):
+        decision = self.coordinator.record_decision(owner, DecisionInput(
+            self.fid, 1, "operator-reported", "chat:merged", "merged", {}))
+        self.coordinator.close_feature(owner, self.fid, 1, decision, "completed")
+
+    def test_drive_start_on_a_closed_feature_claims_and_binds_nothing(self):
+        owner = self.coordinator.claim("attended", self.root / "attended.token")
+        self.close(owner)
+        self.coordinator.release(owner)
+        before = self.snapshot()["owner"]
+        self.assertEqual("FEATURE_CLOSED", self.drive_start(code=4)[2]["error"])
+        self.assertEqual(before, self.snapshot()["owner"])
+        self.assertEqual([], self.rows("events", kind="pipeline.bound"))
+
+    def test_drive_resume_after_the_feature_closed_writes_nothing(self):
+        self.assertEqual(10, self.drive_start("--max-turns", "1")[0])
+        owner = self.driver_owner()
+        for row in self.rows("assignments", feature_id=self.fid, state="prepared"):   # F3: cancelled first
+            self.coordinator.cancel_prepared(owner, row["id"])
+        self.close(owner)
+        before = self.snapshot()["revision"]
+        self.assertEqual("FEATURE_CLOSED", self.drive_resume(code=4)[2]["error"])
+        self.assertEqual(before, self.snapshot()["revision"])
+
+
 class PipelineLoopTests(Base):
     def test_pipeline_bind_seals_content_addressed_file_and_is_idempotent(self):
         owner = self.coordinator.claim("op", self.root / "op.token")

@@ -27,7 +27,7 @@ from . import bmad_spec_author
 from .drive_pipeline import open_high_findings
 from .model import DecisionInput, DomainError, OwnerRef
 from .run_receipt import canonical, seal
-from .service import DRIVE_EVENTS, HOLDING_STATES, Coordinator, releasable
+from .service import DRIVE_EVENTS, HOLDING_STATES, Coordinator, releasable, require_open_feature
 from .store import open_store
 
 HOOK = None   # test seam: callable(point, **info) at named points; production leaves it None
@@ -315,6 +315,7 @@ def start(repo, feature_id: str, value: dict, token_path: Path, bounds: RunBound
     drive_pipeline.check_bindable(store.read_snapshot(), pipeline)
     fd = acquire_lock(repo, exclusive=True)
     try:
+        require_open_feature(store.read_snapshot(), feature_id)   # lifecycle F5: under the lock, before the claim
         lease_id = uuid.uuid4().hex
         owner = Coordinator(store).claim(SESSION + lease_id, token_path)
         _hook("after-claim", lease_id=lease_id)
@@ -382,8 +383,9 @@ def resume(repo, owner: OwnerRef, bounds: RunBounds | dict | None = None, judgme
     store = open_store(repo)
     fd = acquire_lock(repo, exclusive=True)
     try:
-        store.read_export_snapshot(owner)  # fence first: a stale or never-claimed token is OWNERSHIP_CONFLICT
+        snapshot = store.read_export_snapshot(owner)  # fence first: a stale or unclaimed token is OWNERSHIP_CONFLICT
         lease = find_lease(store, owner)
+        require_open_feature(snapshot, lease["feature_id"])   # feature lifecycle F5: before the run's first write
         pipeline = drive_pipeline.load(store.path.parent, lease["pipeline_sha256"])
         if not isinstance(bounds, RunBounds):
             bounds = RunBounds(**{**lease["bounds"], **(bounds or {})})

@@ -116,29 +116,35 @@ def _check_refs(row: dict) -> None:
                 _safe_path(entry["canonical_path"])
 
 
+def file_digests_of(worktree: Path, dirty_paths: list[str]) -> list[dict]:
+    """The portable digests of a feature's dirty paths, a missing file's digest None (also stored at a close)."""
+    file_digests = []
+    for relative in dict.fromkeys(dirty_paths):
+        _safe_path(relative)
+        path = (worktree / relative).resolve()
+        if not path.is_relative_to(worktree):
+            raise DomainError("UNSAFE_PATH", "Feature file escapes its worktree")
+        try:
+            digest = _digest(path.read_bytes())
+        except OSError:
+            digest = None
+        file_digests.append({"path": relative, "digest": digest})
+    return file_digests
+
+
 def _portable(snapshot: dict) -> dict:
     from .bundles import read_manifest
 
     features = []
     for source in snapshot["features"]:
         row = {field: source[field] for field in FEATURE_COLUMNS}
-        if source["state"] == "unresolved" and source["portable_file_digests_json"] is not None:
+        if source["state"] in ("unresolved", "completed", "abandoned") and \
+           source["portable_file_digests_json"] is not None:   # feature lifecycle F7: a closed worktree is never read
             file_digests = json.loads(source["portable_file_digests_json"])
         else:
             if not source["worktree"]:
                 raise DomainError("UNKNOWN_EVIDENCE", "Active feature has no mapped worktree")
-            worktree = Path(source["worktree"])
-            file_digests = []
-            for relative in dict.fromkeys(json.loads(source["dirty_paths_json"])):
-                _safe_path(relative)
-                path = (worktree / relative).resolve()
-                if not path.is_relative_to(worktree):
-                    raise DomainError("UNSAFE_PATH", "Feature file escapes its worktree")
-                try:
-                    digest = _digest(path.read_bytes())
-                except OSError:
-                    digest = None
-                file_digests.append({"path": relative, "digest": digest})
+            file_digests = file_digests_of(Path(source["worktree"]), json.loads(source["dirty_paths_json"]))
         row["file_digests"] = file_digests
         _check_refs(row)
         features.append(row)
@@ -328,12 +334,22 @@ def export_checkpoint(store: Store, owner: OwnerRef, target: Path) -> ExportRece
     return ExportReceipt(destination, snapshot["revision"], digest)
 
 
+def _closed(checkpoint: Checkpoint) -> dict[str, str]:
+    """Feature lifecycle F7: each feature's closed state, from its newest closing event in the checkpoint."""
+    closed = {}
+    for event in sorted(checkpoint.records["events"], key=lambda row: row["revision"]):
+        if event["kind"] in ("feature.completed", "feature.abandoned"):
+            closed[event["subject_id"]] = event["kind"].removeprefix("feature.")
+    return closed
+
+
 def _insert_records(conn: sqlite3.Connection, checkpoint: Checkpoint, mapped: dict[str, str],
                     unknown: set[str]) -> None:
+    closed = _closed(checkpoint)
     for row in checkpoint.features:
         values = {field: row[field] for field in FEATURE_COLUMNS}
         values.update(worktree=mapped.get(row["id"], ""),
-                      state="unresolved" if row["id"] in unknown else "active",
+                      state=closed.get(row["id"]) or ("unresolved" if row["id"] in unknown else "active"),
                       portable_file_digests_json=_canonical(row["file_digests"]).decode())
         fields = tuple(values)
         conn.execute(f"INSERT INTO features({','.join(fields)}) VALUES ({','.join('?' for _ in fields)})",
@@ -373,10 +389,11 @@ def import_checkpoint(repo: RepoIdentity, source: Path,
         if identity.worktree != path or identity.common_dir != repo.common_dir.resolve():
             raise DomainError("INVALID_REPOSITORY", "Mapped worktree must share destination Git common directory")
         mapped[feature_id] = str(path)
-    unknown = ids - set(mapped)
+    closed = _closed(checkpoint)
+    unknown = ids - set(mapped) - set(closed)   # a closed feature needs no worktree and no file check
     for feature in checkpoint.features:
         feature_id = feature["id"]
-        if feature_id not in mapped:
+        if feature_id not in mapped or feature_id in closed:
             continue
         worktree = Path(mapped[feature_id])
         entries = list(feature["file_digests"])

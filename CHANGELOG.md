@@ -4,6 +4,7 @@ Dates, with one tag: `v0.1.0` marks the first public release (2026-10-20, the en
 
 ## 2026-10-26
 
+- Issue #7, closing a feature ([feature lifecycle design](docs/feature-lifecycle-design.md)): `feature close` ends a feature as `completed` or `abandoned`, citing a decision at the current mandate revision, and is refused while an assignment is prepared or holds the fence, a decision request is open or a driver runs. A closed feature refuses every write that starts or records work (`FEATURE_CLOSED`, exit 4), including `drive start`, `drive resume`, an `epic resume` of its story (unless skipped) and `bmad materialize`; exact replays still answer. `status` lists open features and names closed ones in `closed_feature_ids` (`status --all` lists all); `verify` keeps every check of a closed feature's acceptance except the file comparison and reports it `closed`; export and import keep the state without the worktree and without a checkpoint format change.
 - Issue #6, the managed `AGENTS.md` block's position: `doctor`, the base check before every worker launch, and the installer accept the block anywhere in the file, exactly once and unchanged, so project sections may follow it; an upgrade replaces it in place and keeps what surrounds it. Before, anything after the end marker was reported as "Installed AGENTS block differs" (or "Base AGENTS block differs") and refused an upgrade.
 
 ## 2026-10-25

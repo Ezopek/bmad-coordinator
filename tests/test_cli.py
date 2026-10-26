@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -120,6 +121,48 @@ class CLITests(unittest.TestCase):
         alias = self.root / "alias.token"
         alias.symlink_to(self.token)
         self.assertEqual("UNSAFE_PATH", self.cli("release", "--token-file", str(alias), code=2)["error"])
+
+    def test_feature_close_and_status_all(self):
+        self.init_claim()
+        feature_id = self.feature()
+        kept = self.feature()
+        decision = self.cli("decision", "add", "--token-file", str(self.token), data={
+            "feature_id": feature_id, "mandate_revision": 1, "source_kind": "operator-reported",
+            "source_ref": "chat:1", "reason": "dropped", "choice": {"outcome": "abandoned"}})["id"]
+        close = {"expected_revision": 1, "decision_id": decision, "resolution": "abandoned"}
+        self.assertEqual("INVALID_INPUT", self.cli("feature", "close", feature_id, "--token-file", str(self.token),
+                                                  data={**close, "extra": 1}, code=2)["error"])
+        bad = self.root / "bad.token"
+        bad.write_text(json.dumps({"token": "wrong", "generation": 1}))
+        bad.chmod(0o600)
+        self.assertEqual("OWNERSHIP_CONFLICT", self.cli("feature", "close", feature_id, "--token-file", str(bad),
+                                                       data=close, code=3)["error"])
+        self.assertEqual({"state": "abandoned"}, self.cli("feature", "close", feature_id, "--token-file",
+                                                          str(self.token), data=close))
+        status = self.cli("status")
+        self.assertEqual([kept], status["feature_ids"])
+        self.assertEqual([feature_id], status["closed_feature_ids"])
+        self.assertEqual({feature_id: "abandoned", kept: "active"},
+                         {row["id"]: row["state"] for row in self.cli("status", "--all")["features"]})
+        self.assertEqual("FEATURE_CLOSED", self.cli("decision", "add", "--token-file", str(self.token), data={
+            "feature_id": feature_id, "mandate_revision": 1, "source_kind": "operator-reported",
+            "source_ref": "chat:2", "reason": "again", "choice": {}}, code=4)["error"])
+
+    def test_close_is_refused_while_a_driver_holds_the_lock(self):
+        from coordinator_core import drive
+        self.init_claim()
+        feature_id = self.feature()
+        decision = self.cli("decision", "add", "--token-file", str(self.token), data={
+            "feature_id": feature_id, "mandate_revision": 1, "source_kind": "operator-reported",
+            "source_ref": "chat:1", "reason": "merged", "choice": {}})["id"]
+        fd = drive.acquire_lock(resolve_repo(self.repo), exclusive=True)
+        try:
+            self.assertEqual("OWNERSHIP_CONFLICT", self.cli(
+                "feature", "close", feature_id, "--token-file", str(self.token),
+                data={"expected_revision": 1, "decision_id": decision, "resolution": "completed"}, code=3)["error"])
+        finally:
+            os.close(fd)
+        self.assertEqual("active", self.cli("detail", "feature", feature_id)["state"])
 
     def test_corrupt_state_has_one_json_error(self):
         self.cli("init")

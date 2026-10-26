@@ -65,7 +65,7 @@ def _parser():
         return item
 
     leaf("init")
-    leaf("status")
+    leaf("status").add_argument("--all", action="store_true", help="also list closed features")
     diagnosed = leaf("doctor")
     diagnosed.add_argument("--base", required=True)
     diagnosed.add_argument("--client", help="also preflight this worker client (absolute binary and --version only)")
@@ -124,6 +124,7 @@ def _parser():
     leaf("add", parent=feature, token=True, stdin=True)
     revise = leaf("revise", parent=feature, token=True, stdin=True)
     revise.add_argument("id")
+    leaf("close", parent=feature, token=True, stdin=True).add_argument("id")   # feature lifecycle design F2
     decision = leaf("decision").add_subparsers(dest="action", required=True, parser_class=Parser)
     leaf("add", parent=decision, token=True, stdin=True)
     assignment = leaf("assignment").add_subparsers(dest="action", required=True, parser_class=Parser)
@@ -492,7 +493,7 @@ def _run(args):
             return {**accepted, "open_high_findings": drive_pipeline.open_high_findings(review["finding_json"])}
         return bmad_planning.prepare(repo, store, owner, _record(bmad_planning.PlanningPrepare, _object()))
     if args.command == "status":
-        return coordinator.status()
+        return coordinator.status(include_closed=args.all)
     if args.command == "detail":
         return coordinator.detail(args.kind, args.id)
     if args.command == "recover":
@@ -518,6 +519,12 @@ def _run(args):
     if args.command == "feature":
         if args.action == "add":
             return {"id": coordinator.create_feature(owner, _record(FeatureInput, data))}
+        if args.action == "close":
+            data = _shape(data, ("expected_revision", "decision_id", "resolution"))
+            if type(data["expected_revision"]) is not int or type(data["decision_id"]) is not str or \
+               type(data["resolution"]) is not str:
+                raise DomainError("INVALID_INPUT", "Close input has the wrong type")
+            return {"state": coordinator.close_feature(owner, args.id, **data)}
         data = _shape(data, ("expected_revision", "patch", "decision_id"))
         if type(data["expected_revision"]) is not int or not isinstance(data["patch"], dict) or \
            type(data["decision_id"]) is not str:
@@ -556,6 +563,7 @@ def main():
         status = (3 if code == "OWNERSHIP_CONFLICT" else
                   5 if code in {"CORRUPT_STATE", "INCOMPATIBLE_SCHEMA", "INVALID_CHECKPOINT", "CHECKPOINT_CONFLICT"} else
                   4 if code in {"UNINITIALIZED", "UNKNOWN_EVIDENCE", "BLOCKED_EVIDENCE", "RECOVERY_BLOCKED", "STALE_INPUT",
+                                "FEATURE_CLOSED",
                                 "UNSUPPORTED_CONTRACT", "UNSUPPORTED_CLIENT_MODE", "UNSUPPORTED_STEP"} else 2)
         print(json.dumps({"error": code, "message": exc.message, **getattr(exc, "extra", {})}), file=sys.stderr)
         return status
