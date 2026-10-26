@@ -423,9 +423,50 @@ class InstallationTests(unittest.TestCase):
         self.agents.write_bytes(installed.replace(b"Portable BMAD coordinator opt-in", b"Edited by hand"))
         with self.assertRaisesRegex(ValueError, "Changed or misplaced managed AGENTS block"):
             preview(self.repo, upgrade=True)
-        self.agents.write_bytes(installed + b"local tail\n")
+        self.agents.write_bytes(installed.replace(b"<!-- bmad-coordinator:end v1 -->\n",
+                                                  b"<!-- bmad-coordinator:end v1 -->local tail\n"))
         with self.assertRaisesRegex(ValueError, "Changed or misplaced managed AGENTS block"):
             preview(self.repo, upgrade=True)
+
+    def test_block_followed_by_project_sections_passes_doctor_install_and_upgrade(self):
+        import install
+        from coordinator_core.installation import doctor
+        self.installed()
+        tail = b"\n## Git workflow\n\nProject rules after the block.\n"
+        self.agents.write_bytes(self.agents.read_bytes() + tail)
+        git(self.repo, "add", "AGENTS.md", ".bmad-coordinator")
+        git(self.repo, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "installed")
+        report = doctor(resolve_repo(self.repo), "HEAD")
+        self.assertTrue(report.ready, report.reasons)
+        before = self.agents.read_bytes()
+        self.assertFalse(install.apply(self.repo, install.preview(self.repo).sha256).applied)
+        self.assertEqual(before, self.agents.read_bytes())
+        newer = self.newer_source()
+        with patch.object(install, "SOURCE", newer):
+            self.assertTrue(install.apply(self.repo, install.preview(self.repo, upgrade=True).sha256,
+                                          upgrade=True).applied)
+        block = (newer / "package" / "AGENTS.block.md").read_bytes()
+        self.assertEqual(b"Local instructions\r\nKeep this line.\r\n" + block + tail, self.agents.read_bytes())
+        git(self.repo, "add", "AGENTS.md", ".bmad-coordinator")
+        git(self.repo, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "upgraded")
+        self.assertTrue(doctor(resolve_repo(self.repo), "HEAD").ready)
+
+    def test_doctor_refuses_an_edited_block_in_the_middle_or_text_after_the_end_marker(self):
+        from coordinator_core.installation import doctor
+        self.installed()
+        installed = self.agents.read_bytes()
+        tail = b"## After\n"
+        for agents in (installed.replace(b"Portable BMAD coordinator opt-in", b"Edited by hand") + tail,
+                       installed.replace(b"<!-- bmad-coordinator:end v1 -->\n",
+                                         b"<!-- bmad-coordinator:end v1 --> trailing\n") + tail,
+                       installed + installed[installed.index(b"<!-- bmad-coordinator:begin"):]):
+            self.agents.write_bytes(agents)
+            git(self.repo, "add", "AGENTS.md", ".bmad-coordinator")
+            git(self.repo, "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                "commit", "-qm", "edited")
+            report = doctor(resolve_repo(self.repo), "HEAD")
+            self.assertFalse(report.ready)
+            self.assertIn("Current package invalid: Installed AGENTS block differs", report.reasons)
 
     def test_cli_upgrade_flag(self):
         self.installed()

@@ -65,9 +65,11 @@ def _safe_file(root: Path, name: str):
 
 
 def _block(data, digest):
+    """Check the one managed block wherever it sits; project sections may follow it (issue #6)."""
     if data.count(BEGIN) != 1 or data.count(END) != 1:
         return False
-    block = data[data.index(BEGIN):]
+    end = data.index(END) + len(END) + 1
+    block = data[data.index(BEGIN):end]
     return block.endswith(END + b"\n") and hashlib.sha256(block).hexdigest() == digest
 
 

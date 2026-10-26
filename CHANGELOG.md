@@ -2,6 +2,10 @@
 
 Dates, with one tag: `v0.1.0` marks the first public release (2026-10-20, the entry below, published as the single-root history of this repository); the installed package carries a `package_revision` digest, not a version. Each entry names the design document (under `docs/`) whose decisions it implements; the document's status line records the evidence.
 
+## 2026-10-26
+
+- Issue #6, the managed `AGENTS.md` block's position: `doctor`, the base check before every worker launch, and the installer accept the block anywhere in the file, exactly once and unchanged, so project sections may follow it; an upgrade replaces it in place and keeps what surrounds it. Before, anything after the end marker was reported as "Installed AGENTS block differs" (or "Base AGENTS block differs") and refused an upgrade.
+
 ## 2026-10-25
 
 - Issue #4, the planning path on a gitignored BMAD install ([BMAD snapshot design](docs/bmad-snapshot-design.md)): `bmad materialize` copies the main worktree's `_bmad/` and client root into a sealed, content-addressed snapshot and from it into the feature worktree, proving the copy by its listing and its fingerprint; the planning and planning-review bindings record `bmad_source`, every prepare, derive, reservation and return compares the materialized trees with the snapshot before any installed code runs, replay checks the stored snapshot, and a boundary writer gets the roots read-only. `doctor --bmad` checks the install state and the ignore rules. A committed install keeps its behavior and its binding digests.

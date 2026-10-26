@@ -82,12 +82,14 @@ def _block(agents, content, installed_block_sha256=None):
         if agents.count(BEGIN) != 1 or agents.count(END) != 1:
             raise ValueError("Changed or duplicate AGENTS markers")
         start = agents.index(BEGIN)
+        end = agents.index(END) + len(END) + 1   # the block ends at its end marker's newline (issue #6)
+        if not agents[start:end].endswith(END + b"\n"):
+            raise ValueError("Changed or misplaced managed AGENTS block")
         if installed_block_sha256 is not None:
-            end = agents.find(b"\n", agents.index(END)) + 1 or len(agents)
-            if agents[end:] or _sha(agents[start:end]) != installed_block_sha256:
+            if _sha(agents[start:end]) != installed_block_sha256:
                 raise ValueError("Changed or misplaced managed AGENTS block")
-            return agents[:start] + content, True
-        if agents[start:] != content:
+            return agents[:start] + content + agents[end:], True
+        if agents[start:end] != content:
             raise ValueError("Changed or misplaced managed AGENTS block")
         return agents, True
     if installed_block_sha256 is not None:
