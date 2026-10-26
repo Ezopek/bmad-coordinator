@@ -14,7 +14,8 @@ from types import UnionType
 from typing import Any, Union, get_args, get_origin, get_type_hints
 
 from . import boundary
-from . import bill, bmad_contract, bmad_planning, bmad_review, clients, drive, drive_epic, drive_pipeline, inbox
+from . import bill, bmad_contract, bmad_planning, bmad_review, bmad_snapshot, clients, drive, drive_epic, drive_pipeline
+from . import inbox
 from .exporter import export_checkpoint, import_checkpoint
 from .installation import doctor
 from .model import (AssignmentInput, BundleInput, DecisionInput, DomainError, FeatureInput,
@@ -71,6 +72,10 @@ def _parser():
     diagnosed.add_argument("--boundary", choices=boundary.KINDS,
                            help="also check the launch boundary (a no-op sandbox, and with --client the client's "
                                 "--version inside its mount set); never a model call")
+    diagnosed.add_argument("--bmad", action="store_true",
+                           help="also check the BMAD install for the planning path (tracked, or gitignored and "
+                                "ready to materialize); never runs installed code")
+    diagnosed.add_argument("--client-root", default=".agents/skills")
     worker = leaf("worker").add_subparsers(dest="action", required=True, parser_class=Parser)
     inspected = leaf("inspect", parent=worker)
     inspected.add_argument("id")
@@ -86,6 +91,9 @@ def _parser():
     bmad = leaf("bmad").add_subparsers(dest="action", required=True, parser_class=Parser)
     discovered = leaf("discover", parent=bmad)
     discovered.add_argument("--client-root", default=".agents/skills")
+    materialized = leaf("materialize", parent=bmad, token=True)   # BMAD snapshot design S10
+    materialized.add_argument("--client-root", default=".agents/skills")
+    materialized.add_argument("--tree", help="an earlier snapshot's id (64 hex), not the main worktree's install")
     leaf("prepare", parent=bmad, token=True, stdin=True)
     bmad_run = leaf("run", parent=bmad, token=True)
     bmad_run.add_argument("id")
@@ -406,11 +414,28 @@ def _run(args):
             if not result["boundary"]["ready"]:
                 result["ready"] = False
                 result["reasons"] = result["reasons"] + [f"Boundary {args.boundary} is not ready"]
+        if args.bmad:   # BMAD snapshot design S5
+            result["bmad"] = bmad_snapshot.doctor(repo, args.client_root)
+            if result["bmad"]["reasons"]:
+                result["ready"] = False
+                result["reasons"] = result["reasons"] + ["The BMAD install is not ready for the planning path"]
         return result
     if args.command == "init":
         return {"repository_id": open_store(repo, create=True, exclusive=True).repository_id}
     if args.command == "bmad" and args.action == "discover":
-        return asdict(bmad_contract.discover(repo.worktree, args.client_root))
+        try:   # BMAD snapshot design S7: a drifted materialized install is compared before it is executed
+            events = open_store(repo).read_snapshot()["events"]
+        except DomainError as exc:
+            if exc.code != "UNINITIALIZED":
+                raise
+            events = []
+        bmad_snapshot.guard(repo.worktree, repo.common_dir, events)
+        report = asdict(bmad_contract.discover(repo.worktree, args.client_root))
+        if not report["supported"] and args.client_root in bmad_snapshot.ROOTS and \
+           bmad_snapshot.classify(repo.worktree, args.client_root) == "absent" and \
+           not any(os.path.lexists(repo.worktree / top) for top in ("_bmad", args.client_root)):
+            report["reasons"].append("no BMAD install in this worktree: run bmad materialize")   # design S10
+        return report
     if args.command == "import":
         data = _shape(_object(), (), ("worktree_map",))
         mapping = data.get("worktree_map", {})
@@ -446,6 +471,8 @@ def _run(args):
         if args.action == "verify":
             return bmad_review.verify_bmad(store)
         owner = _owner(args.token_file, repo)
+        if args.action == "materialize":
+            return bmad_snapshot.materialize_command(repo, store, owner, args.client_root, args.tree)
         if args.action == "run":
             return bmad_planning.run(repo, store, owner, args.id, args.model, args.timeout, args.client,
                                      args.max_turns, args.boundary)

@@ -29,8 +29,8 @@ DRIVE_EVENTS = frozenset({"pipeline.bound", "drive.leased", "drive.started", "dr
                           "inbox.rejected", "drive.ended", "judgment.reserved", "judgment.returned",
                           "judgment.unknown", "judgment.failed-preflight",
                           "story.setup", "story.baseline", "story.committed", "story.verified", "story.status",
-                          "epic.started", "epic.advanced", "epic.ended"})
-ANCHOR_TOPS = ("pipelines", "drives", "inbox", "judgments", "story", "epics")
+                          "epic.started", "epic.advanced", "epic.ended", "bmad.materialized"})
+ANCHOR_TOPS = ("pipelines", "drives", "inbox", "judgments", "story", "epics", "bmad")
 DETAIL_TABLES = {
     "feature": "features", "decision": "decisions", "decision-request": "decision_requests",
     "assignment": "assignments", "bundle": "bundles", "review": "reviews",

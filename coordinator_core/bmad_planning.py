@@ -12,7 +12,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from . import bmad_contract as contract
-from . import boundary, bundles, clients
+from . import bmad_snapshot, boundary, bundles, clients
 from .model import AssignmentInput, DomainError
 from .profiles import ReturnProfile
 from .repo import resolve_repo
@@ -753,6 +753,7 @@ def prepare(repo, store, owner, spec: PlanningPrepare) -> dict:
                 raise DomainError("IDEMPOTENCY_CONFLICT", "Idempotency key was used with a different prepare spec")
             return {"assignment_id": prior_row["id"], "brief_ref": prior_row["brief_ref"],
                     "binding_sha256": bound["payload_digest"]}
+    source = bmad_snapshot.guard(worktree, repo.common_dir, snapshot["events"])   # BMAD snapshot design S7
     report = contract.discover(worktree, spec.client_root)
     if not report.supported:
         raise DomainError("UNSUPPORTED_CONTRACT", "; ".join(report.reasons))
@@ -861,6 +862,8 @@ def prepare(repo, store, owner, spec: PlanningPrepare) -> dict:
              "expected_customization": [{"skill": spec.skill,
                                          "sha256": report.contract["resolved"]["skills"][spec.skill]}],
              **client_binding(spec)}
+    if source is not None:   # absent for a committed install, whose bindings keep their digests
+        value["bmad_source"] = source
     if spec.client in RULED_CLIENTS:
         value["commands"] = author_commands(worktree, spec.client_root, spec.skill, workspace)
     sealed = {item["id"]: {"id": item["id"], "digest": item["digest"]} for item in inherited}

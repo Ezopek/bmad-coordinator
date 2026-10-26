@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import bmad_contract as contract
-from . import boundary, bundles, clients
+from . import bmad_snapshot, boundary, bundles, clients
 from .bmad_implementation import SPEC_AUTHOR, STORY_PROFILES
 from .bmad_planning import (AFFECTED_IDS_RULE, PLAN, REVIEW, _file_entry, _row, _write_brief, client_binding,
                             client_label, effective_dependencies, read_assignment_binding, refuse_while_running,
@@ -579,8 +579,9 @@ def review_prepare(repo, store, owner, spec: ReviewPrepare) -> dict:
         raise _invalid("A code review takes no compatibility decision")
     if not code and not spec.compat_decision_id:
         raise _invalid("A planning review needs a compatibility decision")
-    report = None
+    report = source = None
     if not code:
+        source = bmad_snapshot.guard(worktree, repo.common_dir, snapshot["events"])   # BMAD snapshot design S7
         report = contract.discover(worktree, spec.client_root)
         if not report.supported:
             raise DomainError("UNSUPPORTED_CONTRACT", "; ".join(report.reasons))
@@ -651,6 +652,8 @@ def review_prepare(repo, store, owner, spec: ReviewPrepare) -> dict:
     if not code:   # a planning review binding seals the contract it was prepared against
         value.update(fingerprint_sha256=report.fingerprint_sha256, contract=report.contract,
                      compat_decision_id=spec.compat_decision_id)
+        if source is not None:
+            value["bmad_source"] = source
     evidence = seal_binding(repo.common_dir / "coordinator", value)
     coordinator.bind_assignment(owner, assignment_id, evidence)
     return {"assignment_id": assignment_id, "brief_ref": brief_ref, "binding_sha256": evidence.payload_digest}

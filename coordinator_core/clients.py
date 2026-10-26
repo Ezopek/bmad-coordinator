@@ -32,7 +32,7 @@ MAX_RETURN_BYTES = 1 << 20
 MAX_DEPTH = 64
 GROUP_WAIT = 2.0  # seconds per drain step (N2)
 SEALED_TOPS = ("bindings", "bundles", "judgments", "pipelines", "drives", "resolutions",  # D16; driver folders last
-               "story")
+               "story", "bmad")   # bmad: issue #4's snapshots
 ENDED = ("end.json", "timeout.json", "interrupted.json")
 RUNNING_SEALED = ("envelope.json", "return.schema.json", "launch-intent.json", "launch.json")
 # A parent agent session's variables (a Claude Code session's CLAUDE*/CLAUDECODE and messaging socket and token, other

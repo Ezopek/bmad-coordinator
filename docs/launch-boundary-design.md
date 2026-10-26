@@ -187,8 +187,9 @@ On fixtures, within modest caps:
 1. **The client's working state is still writable.** Persistent entries are read-only or detected (L3). A file the clients start reading in a later version, outside those lists, would not be. A full overlay with only the credential file passed through needs the clients' credential write patterns, which the spike did not map.
 2. **Credentials stay reachable.** The process needs them, so its tools can reach them through the mounted state or `/proc/self/environ`.
 3. **The network is open.** Exfiltration is unchanged; the receipts record that the boundary shares the network. Sharing the network namespace also leaves the host's abstract Unix sockets reachable, for example a D-Bus session bus that listens on one. The allowlist drops the address variables, but a process that knows an address can still connect. Unsharing the network needs a user-space network stack (`pasta`, `slirp4netns`), which is the next tightening.
-4. **Kernels and hosts differ.** Ubuntu 24.04's AppArmor restriction blocks unprivileged namespaces by default; L7 names it, and lifting it is the operator's call.
-5. **Workers' own test runs need project mounts,** and a project that declares none may see its worker's local test runs fail where they passed before, while the coordinator's verify still runs outside.
+4. **The client's own integrations still load.** A sandboxed Codex worker reads the operator's `config.toml`, so its MCP servers, plugins and hooks start inside the boundary (issue #5 asked for their explicit treatment). They are kept on the operator's decision (2026-10-25): they run with the worker's mounts and the shared network, and a project that wants them off sets that in the Codex configuration.
+5. **Kernels and hosts differ.** Ubuntu 24.04's AppArmor restriction blocks unprivileged namespaces by default; L7 names it, and lifting it is the operator's call.
+6. **Workers' own test runs need project mounts,** and a project that declares none may see its worker's local test runs fail where they passed before, while the coordinator's verify still runs outside.
 
 ## 8. Review findings and where they went
 

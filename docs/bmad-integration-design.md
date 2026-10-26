@@ -1,6 +1,6 @@
 # Coordinator slice 3: installed BMAD planning integration
 
-Status: technical design for implementation, 2026-10-04, revised after design review. Baseline `125848a` (slice 2 done), 145 passing tests, SQLite schema 1, Python 3.11+ standard library. Codex CLI `exec` stays the only product transport. This realizes [delivery outline slice 3](v1-delivery-outline.md) on the [v1 design](v1-design.md) and [worker adapter](worker-adapter-design.md). It is derived from read-only research and direct reads of the installed skills and core source. It is not implementation evidence and claims no live BMAD run.
+Status: technical design for implementation, 2026-10-04, revised after design review. Baseline `125848a` (slice 2 done), 145 passing tests, SQLite schema 1, Python 3.11+ standard library. Codex CLI `exec` stays the only product transport. A repository that keeps the install out of Git is served by the [BMAD snapshot design](bmad-snapshot-design.md) (issue #4). This realizes [delivery outline slice 3](v1-delivery-outline.md) on the [v1 design](v1-design.md) and [worker adapter](worker-adapter-design.md). It is derived from read-only research and direct reads of the installed skills and core source. It is not implementation evidence and claims no live BMAD run.
 
 ## 1. Scope
 

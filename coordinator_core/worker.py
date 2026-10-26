@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import boundary, bundles, clients, profiles
+from . import bmad_snapshot, boundary, bundles, clients, profiles
 from .installation import doctor
 from .model import DomainError, LaunchEvidence, OwnerRef, ReturnEvidence
 from .repo import GIT_SAFE, RepoIdentity, resolve_repo
@@ -486,6 +486,8 @@ def _validated_receipt(repo, store, assignment, directory, historical=False):
         raise DomainError("UNKNOWN_EVIDENCE", "Stored launch reference differs")
     client = _recorded_client(launch, value, binding, events, assignment["id"])
     _check_boundary(launch, binding)
+    if binding is not None and binding.get("bmad_source"):   # BMAD snapshot design S7: the stored snapshot
+        bmad_snapshot.verify_store(repo.common_dir, binding["bmad_source"]["tree"])
     read = launch.get("requested_mode") == "read"   # Copilot reviewer design V1, V6
     if read != (binding is not None and binding.get("mode") == "read") or launch.get("qualification") is True:
         raise DomainError("UNKNOWN_EVIDENCE", "The receipt's read mode differs from its binding, or it is a "
@@ -681,6 +683,7 @@ def run_assignment(repo: RepoIdentity, store: Store, owner: OwnerRef, assignment
     _check_checkout(repo, feature)
     binding = ReceiptEvidenceSource(repo, assignment_id, assignment["request_fingerprint"], store).binding() \
         if profile_name else None
+    materialized = (binding or {}).get("bmad_source")   # BMAD snapshot design S7: a materialized install
     chosen = _resolve_client(client, binding)
     kind = _resolve_boundary(boundary_kind, binding)
     read = bool(binding) and binding.get("mode") == "read"   # Copilot reviewer design revision 6
@@ -729,9 +732,13 @@ def run_assignment(repo: RepoIdentity, store: Store, owner: OwnerRef, assignment
         declared = ((binding or {}).get("project") or {}).get("boundary") or {}   # launch-boundary L4
         extra = [boundary.Mount(mode, os.path.normpath(os.path.expanduser(path)))
                  for mode in ("ro", "rw") for path in declared.get(mode, [])] if mode != "read-only" else []
+        if materialized and mode != "read-only":   # BMAD snapshot design S8: the materialized roots, read-only
+            extra += [boundary.Mount("ro", str(repo.worktree / top)) for top in ("_bmad", materialized["client_root"])]
         plan = clients.plan_boundary(kind, chosen, binary, boundary.project_mounts(
             "reviewer" if mode == "read-only" else "writer", directory, repo.worktree, repo.worktree, repo.common_dir,
             sealed=sealed, others=tuple(protected[3:])), protected, commands, extra)
+    if materialized:   # BMAD snapshot design S7: the materialized install, compared before the reservation
+        bmad_snapshot.guard(repo.worktree, repo.common_dir, store.read_snapshot()["events"], materialized["tree"])
     # The owner-fenced reservation is authoritative; ordinary unmet dependencies and fences
     # must fail before consuming an irreversible sidecar. The baseline snapshot follows it.
     Coordinator(store).reserve_launch(owner, assignment_id, chosen.name)
@@ -912,6 +919,9 @@ def run_assignment(repo: RepoIdentity, store: Store, owner: OwnerRef, assignment
             return _report(assignment_id, "unknown", directory, [clients.integrity_cause(record)])
         try:
             after = inventory(repo.worktree)
+            if materialized:   # BMAD snapshot design S7: ignored files are outside the inventory, compared here
+                bmad_snapshot.guard(repo.worktree, repo.common_dir, store.read_snapshot()["events"],
+                                    materialized["tree"], "UNKNOWN_EVIDENCE")
             if read and delta(cwd_before, inventory(read_cwd)):   # V5: nothing was written
                 raise DomainError("UNKNOWN_EVIDENCE", "The read-mode run changed its staged inputs")
             # design D25: after a non-zero exit only a client stop, read from the stream, goes on

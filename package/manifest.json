@@ -13,6 +13,7 @@
     {"source": "coordinator_core/bmad_implementation.py", "destination": "coordinator_core/bmad_implementation.py"},
     {"source": "coordinator_core/bmad_planning.py", "destination": "coordinator_core/bmad_planning.py"},
     {"source": "coordinator_core/bmad_review.py", "destination": "coordinator_core/bmad_review.py"},
+    {"source": "coordinator_core/bmad_snapshot.py", "destination": "coordinator_core/bmad_snapshot.py"},
     {"source": "coordinator_core/bmad_spec_author.py", "destination": "coordinator_core/bmad_spec_author.py"},
     {"source": "coordinator_core/bundles.py", "destination": "coordinator_core/bundles.py"},
     {"source": "coordinator_core/clients.py", "destination": "coordinator_core/clients.py"},

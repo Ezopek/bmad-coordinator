@@ -12,7 +12,7 @@ from pathlib import Path, PurePosixPath
 from . import backlog, boundary
 from . import bmad_contract as contract
 from . import bmad_implementation as implementation
-from . import bmad_planning, bmad_spec_author, bundles, clients, judgment
+from . import bmad_planning, bmad_snapshot, bmad_spec_author, bundles, clients, judgment
 from .bmad_review import CODE_LENSES, SPEC_LENSES, finding_counts
 from .model import DecisionInput, DomainError, OwnerRef
 from .run_receipt import canonical, private_file, read_binding, read_receipt
@@ -598,10 +598,17 @@ def gather(repo, store, snapshot: dict, value: dict, generation: int) -> dict:
     feature = next(row for row in snapshot["features"] if row["id"] == value["feature_id"])
     worktree = Path(feature["worktree"])
     story = any(step["kind"] == "implement" for step in value["steps"])
-    report = None if story else contract.discover(worktree, ".agents/skills")   # design D22
+    drift = None
+    if not story:   # BMAD snapshot design S7: a drifted materialized install is never executed
+        try:
+            bmad_snapshot.guard(worktree, repo.common_dir, snapshot["events"])
+        except DomainError as exc:
+            drift = exc.message
+    report = None if story or drift else contract.discover(worktree, ".agents/skills")   # design D22
     facts = {"generation": generation, "workspaces": {}, "bindings": {}, "unbound": [], "payloads": {},
              "reviews": {}, "bundles": {}, "acceptances": {}, "export": None,
-             "contract": None if report is None else {"supported": report.supported,
+             "contract": {"supported": False, "fingerprint": None, "reasons": [drift]} if drift else
+             None if report is None else {"supported": report.supported,
                                                       "fingerprint": report.fingerprint_sha256,
                                                       "reasons": list(report.reasons)[:5]},
              "judgments": judgment.facts(store.path.parent, snapshot, feature["id"])}
