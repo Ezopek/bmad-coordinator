@@ -460,6 +460,11 @@ class CopilotConformance(ClientConformance, Harness):
 
     def setUp(self):
         super().setUp()
+        environ = patch.dict(os.environ)  # restored afterwards; the operator's GitHub tokens never reach the fake:
+        environ.start()                   # a classic GH_TOKEN would be refused before any launch (issue #3)
+        self.addCleanup(environ.stop)
+        for name in ("COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"):
+            os.environ.pop(name, None)
         (self.root / "home").mkdir()
         self.env["HOME"] = str(self.root / "home")  # the $HOME session-leak check never sees the real home
 

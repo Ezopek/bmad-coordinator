@@ -350,11 +350,12 @@ def doctor(repo: RepoIdentity, client_root: str) -> dict:
 
 def materialize_command(repo: RepoIdentity, store, owner, client_root: str, tree: str | None) -> dict:
     """S10: `bmad materialize` in the feature's own worktree, then the event; idempotent."""
-    from .repo import resolve_repo
     from .service import require_open_feature
     check_root(client_root)
     features = store.read_export_snapshot(owner)["features"]   # authenticates the owner first
-    matching = [row for row in features if row["worktree"] and resolve_repo(Path(row["worktree"])) == repo]
+    # by path, never by running Git in each one: a closed feature's worktree may be gone (issue #8); every feature's
+    # recorded worktree is its resolved top level, in this repository
+    matching = [row for row in features if row["worktree"] and Path(row["worktree"]).resolve() == repo.worktree]
     # an open feature first: a worktree may be reused by a new feature after its old one closed
     feature = next((row for row in matching if row["state"] in ("active", "unresolved")),
                    matching[0] if matching else None)

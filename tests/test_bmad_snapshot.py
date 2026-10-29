@@ -305,6 +305,27 @@ class CliTests(SnapshotCase):
         self.assertEqual("FEATURE_CLOSED", self.materialize(ok=False)["error"])
         self.assertFalse((self.t.path / "_bmad").exists())
 
+    def close(self, feature_id):
+        from coordinator_core.model import DecisionInput
+        decision = self.coordinator.record_decision(self.owner, DecisionInput(
+            feature_id, 1, "operator-reported", "chat:done", "done", {}))
+        self.coordinator.close_feature(self.owner, feature_id, 1, decision, "completed")
+
+    def test_a_removed_worktree_of_a_closed_feature_does_not_block_another_feature(self):
+        probe = self.tree("probe")   # issue #8: a closed feature's worktree removed after the merge
+        self.close(probe.feature_id)
+        git(self.main, "worktree", "remove", "--force", str(probe.path))
+        answer = self.materialize()
+        self.assertTrue(answer["written"])
+        self.assertEqual([], snapshot.compare(self.t.path, self.listing(answer["tree"])))
+        self.assertEqual(self.t.feature_id, self.events()[-1]["subject_id"])
+
+    def test_a_worktree_reused_by_a_new_feature_materializes_for_the_open_one(self):
+        self.close(self.t.feature_id)
+        reused = self.add_feature(self.t, "feature-again")
+        self.assertTrue(self.materialize()["written"])
+        self.assertEqual(reused, self.events()[-1]["subject_id"])
+
     def test_materialize_refuses_a_committed_install(self):
         snapshot.materialize(self.t.repo, self.root_, snapshot.take_snapshot(self.t.repo, self.root_))
         git(self.t.path, "add", "-f", "_bmad", ".agents/skills")

@@ -2,6 +2,10 @@
 
 Dates, with one tag: `v0.1.0` marks the first public release (2026-10-20, the entry below, published as the single-root history of this repository); the installed package carries a `package_revision` digest, not a version. Each entry names the design document (under `docs/`) whose decisions it implements; the document's status line records the evidence.
 
+## 2026-10-29
+
+- Issue #8: `bmad materialize` finds its feature by the recorded worktree's path instead of running Git in every recorded worktree, so a closed feature whose worktree was removed after the merge no longer makes it fail with `INVALID_REPOSITORY` for another feature. The snapshot checks, the open-feature preference for a reused worktree and `FEATURE_CLOSED` for a closed target are unchanged.
+
 ## 2026-10-26
 
 - Issue #7, closing a feature ([feature lifecycle design](docs/feature-lifecycle-design.md)): `feature close` ends a feature as `completed` or `abandoned`, citing a decision at the current mandate revision, and is refused while an assignment is prepared or holds the fence, a decision request is open or a driver runs. A closed feature refuses every write that starts or records work (`FEATURE_CLOSED`, exit 4), including `drive start`, `drive resume`, an `epic resume` of its story (unless skipped) and `bmad materialize`; exact replays still answer. `status` lists open features and names closed ones in `closed_feature_ids` (`status --all` lists all); `verify` keeps every check of a closed feature's acceptance except the file comparison and reports it `closed`; export and import keep the state without the worktree and without a checkpoint format change.
